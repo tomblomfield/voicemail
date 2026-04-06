@@ -1,8 +1,9 @@
-import { NextResponse } from "next/server";
-import { getAuthUrl, isAuthenticated } from "@/app/lib/gmail";
+import { NextRequest, NextResponse } from "next/server";
+import { getAuthUrl } from "@/app/lib/gmail";
 
-export async function GET() {
-  if (isAuthenticated()) {
+export async function GET(request: NextRequest) {
+  const cookie = request.cookies.get("gmail_tokens");
+  if (cookie) {
     return NextResponse.json({ authenticated: true });
   }
   const url = getAuthUrl();

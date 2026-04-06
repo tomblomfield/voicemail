@@ -5,11 +5,22 @@ import {
   sendReply,
   archiveEmail,
   markAsRead,
-  isAuthenticated,
+  decryptTokens,
 } from "@/app/lib/gmail";
 
+function getTokens(request: NextRequest) {
+  const cookie = request.cookies.get("gmail_tokens");
+  if (!cookie) return null;
+  try {
+    return decryptTokens(cookie.value);
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(request: NextRequest) {
-  if (!isAuthenticated()) {
+  const tokens = getTokens(request);
+  if (!tokens) {
     return NextResponse.json(
       { error: "Not authenticated. Please connect Gmail first." },
       { status: 401 }
@@ -21,23 +32,23 @@ export async function POST(request: NextRequest) {
   try {
     switch (action) {
       case "list": {
-        const emails = await getUnreadEmails(params.maxResults || 10);
+        const emails = await getUnreadEmails(tokens, params.maxResults || 10);
         return NextResponse.json({ emails });
       }
       case "read": {
-        const body = await getEmailBody(params.messageId);
+        const body = await getEmailBody(tokens, params.messageId);
         return NextResponse.json({ body });
       }
       case "reply": {
-        await sendReply(params.messageId, params.threadId, params.body);
+        await sendReply(tokens, params.messageId, params.threadId, params.body);
         return NextResponse.json({ success: true });
       }
       case "archive": {
-        await archiveEmail(params.messageId);
+        await archiveEmail(tokens, params.messageId);
         return NextResponse.json({ success: true });
       }
       case "markRead": {
-        await markAsRead(params.messageId);
+        await markAsRead(tokens, params.messageId);
         return NextResponse.json({ success: true });
       }
       default:
@@ -47,9 +58,9 @@ export async function POST(request: NextRequest) {
         );
     }
   } catch (error: any) {
-    console.error(`Gmail API error (${action}):`, error);
+    console.error(`Gmail API error (${action}): ${error.message || "unknown"}`);
     return NextResponse.json(
-      { error: error.message || "Gmail API error" },
+      { error: "Gmail API error" },
       { status: 500 }
     );
   }
