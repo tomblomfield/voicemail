@@ -1,6 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const cookie = request.cookies.get("gmail_tokens");
+  if (!cookie) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const response = await fetch(
       "https://api.openai.com/v1/realtime/sessions",

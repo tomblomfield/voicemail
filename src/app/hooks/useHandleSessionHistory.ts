@@ -41,7 +41,7 @@ export function useHandleSessionHistory() {
       try {
         return JSON.parse(val);
       } catch {
-        console.warn('Failed to parse JSON:', val);
+        // failed to parse JSON
         return val;
       }
     }
@@ -86,7 +86,6 @@ export function useHandleSessionHistory() {
   }
 
   function handleHistoryAdded(item: any) {
-    console.log("[handleHistoryAdded] ", item);
     if (!item || item.type !== 'message') return;
 
     const { itemId, role, content = [] } = item;
@@ -111,7 +110,6 @@ export function useHandleSessionHistory() {
   }
 
   function handleHistoryUpdated(items: any[]) {
-    console.log("[handleHistoryUpdated] ", items);
     items.forEach((item: any) => {
       if (!item || item.type !== 'message') return;
 
@@ -161,7 +159,7 @@ export function useHandleSessionHistory() {
   }
 
   function handleGuardrailTripped(details: any, _agent: any, guardrail: any) {
-    console.log("[guardrail tripped]", details, _agent, guardrail);
+    // guardrail tripped
     const moderation = extractModeration(guardrail.result.output.outputInfo);
     logServerEvent({ type: 'guardrail_tripped', payload: moderation });
 

@@ -1,7 +1,11 @@
 import { google } from "googleapis";
 import crypto from "crypto";
 
-const ENCRYPTION_KEY = process.env.SESSION_SECRET || "default-dev-key-change-me-in-prod!!";
+function getEncryptionKey(): string {
+  const key = process.env.SESSION_SECRET;
+  if (!key) throw new Error("SESSION_SECRET environment variable is required");
+  return key;
+}
 
 function getOAuth2Client() {
   return new google.auth.OAuth2(
@@ -30,7 +34,7 @@ export async function exchangeCode(code: string) {
 }
 
 export function encryptTokens(tokens: any): string {
-  const key = crypto.scryptSync(ENCRYPTION_KEY, "salt", 32);
+  const key = crypto.scryptSync(getEncryptionKey(), "salt", 32);
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   let encrypted = cipher.update(JSON.stringify(tokens), "utf8", "base64");
@@ -40,7 +44,7 @@ export function encryptTokens(tokens: any): string {
 }
 
 export function decryptTokens(encrypted: string): any {
-  const key = crypto.scryptSync(ENCRYPTION_KEY, "salt", 32);
+  const key = crypto.scryptSync(getEncryptionKey(), "salt", 32);
   const [ivB64, tagB64, data] = encrypted.split(":");
   const iv = Buffer.from(ivB64, "base64");
   const tag = Buffer.from(tagB64, "base64");

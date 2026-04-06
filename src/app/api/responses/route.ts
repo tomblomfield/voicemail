@@ -3,6 +3,11 @@ import OpenAI from 'openai';
 
 // Proxy endpoint for the OpenAI Responses API
 export async function POST(req: NextRequest) {
+  const cookie = req.cookies.get("gmail_tokens");
+  if (!cookie) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const body = await req.json();
 
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
