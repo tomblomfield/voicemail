@@ -1,6 +1,76 @@
 import { google } from "googleapis";
 import crypto from "crypto";
 
+export const GMAIL_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.modify",
+  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/gmail.settings.basic",
+] as const;
+
+export const GMAIL_FILTER_WRITE_SCOPE =
+  "https://www.googleapis.com/auth/gmail.settings.basic";
+
+export type FilterMatchStrategy = "from" | "fromAndSubject";
+
+export interface GmailFilterCriteria {
+  from?: string;
+  to?: string;
+  subject?: string;
+  query?: string;
+  negatedQuery?: string;
+  hasAttachment?: boolean;
+  excludeChats?: boolean;
+}
+
+export interface GmailFilterAction {
+  addLabelIds?: string[];
+  removeLabelIds?: string[];
+  forward?: string;
+}
+
+export interface GmailFilterSummary {
+  id: string;
+  criteria: GmailFilterCriteria;
+  action: GmailFilterAction;
+  archives: boolean;
+  description: string;
+}
+
+export interface ArchiveFilterSuggestion {
+  matchStrategy: FilterMatchStrategy;
+  criteria: GmailFilterCriteria;
+  description: string;
+}
+
+export interface ArchiveFilterPreview {
+  message: {
+    from: string;
+    fromName: string;
+    fromEmail: string;
+    subject: string;
+  };
+  recommendedStrategy: FilterMatchStrategy;
+  suggestions: ArchiveFilterSuggestion[];
+  similarFilters: Array<
+    GmailFilterSummary & {
+      score: number;
+      isVeryClose: boolean;
+      reasons: string[];
+    }
+  >;
+}
+
+export class GmailScopeError extends Error {
+  missingScopes: string[];
+
+  constructor(missingScopes: string[]) {
+    super("Missing required Gmail scopes");
+    this.name = "GmailScopeError";
+    this.missingScopes = missingScopes;
+  }
+}
+
 const FOOTER_ELIGIBLE_SENDERS = new Set([
   "tomblomfield@gmail.com",
   "tb@ycombinator.com",
@@ -24,11 +94,7 @@ export function getAuthUrl(): string {
   return getOAuth2Client().generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
-    scope: [
-      "https://www.googleapis.com/auth/gmail.readonly",
-      "https://www.googleapis.com/auth/gmail.modify",
-      "https://www.googleapis.com/auth/gmail.send",
-    ],
+    scope: [...GMAIL_SCOPES],
   });
 }
 
@@ -60,6 +126,19 @@ export function decryptTokens(encrypted: string): any {
   return JSON.parse(decrypted);
 }
 
+export function getMissingScopes(
+  tokens: any,
+  requiredScopes: readonly string[] = GMAIL_SCOPES
+): string[] {
+  const grantedScopes = new Set(
+    String(tokens?.scope || "")
+      .split(/\s+/)
+      .filter(Boolean)
+  );
+
+  return requiredScopes.filter((scope) => !grantedScopes.has(scope));
+}
+
 function getAuthedClient(tokens: any) {
   const client = getOAuth2Client();
   client.setCredentials(tokens);
@@ -68,6 +147,206 @@ function getAuthedClient(tokens: any) {
 
 function getGmail(tokens: any) {
   return google.gmail({ version: "v1", auth: getAuthedClient(tokens) });
+}
+
+function requireScopes(tokens: any, requiredScopes: readonly string[]) {
+  const missingScopes = getMissingScopes(tokens, requiredScopes);
+  if (missingScopes.length > 0) {
+    throw new GmailScopeError(missingScopes);
+  }
+}
+
+function getHeaders(detail: any) {
+  return detail.data.payload?.headers || [];
+}
+
+function getHeaderValue(headers: any[], name: string) {
+  return headers.find((h) => h.name === name)?.value || "";
+}
+
+function parseMailbox(value: string): { name: string; email: string } {
+  const trimmed = value.trim();
+  const bracketMatch = trimmed.match(/^(.*?)(?:<([^>]+)>)$/);
+  if (bracketMatch) {
+    return {
+      name: bracketMatch[1].trim().replace(/^"|"$/g, ""),
+      email: bracketMatch[2].trim().toLowerCase(),
+    };
+  }
+
+  if (trimmed.includes("@")) {
+    return { name: "", email: trimmed.toLowerCase() };
+  }
+
+  return { name: trimmed, email: "" };
+}
+
+function parseAddressList(value: string) {
+  return value
+    .split(",")
+    .map((entry) => parseMailbox(entry))
+    .filter((entry) => entry.name || entry.email);
+}
+
+export function normalizeSubjectForFilter(subject: string): string {
+  return subject
+    .replace(/^\s*((re|fwd?|aw):\s*)+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function buildArchiveFilterCriteria(
+  fromEmail: string,
+  subject: string,
+  matchStrategy: FilterMatchStrategy
+): GmailFilterCriteria {
+  const normalizedSubject = normalizeSubjectForFilter(subject);
+  if (matchStrategy === "fromAndSubject" && normalizedSubject) {
+    return {
+      from: fromEmail,
+      subject: normalizedSubject,
+    };
+  }
+
+  return { from: fromEmail };
+}
+
+function filterArchives(action: GmailFilterAction = {}): boolean {
+  return action.removeLabelIds?.includes("INBOX") || false;
+}
+
+function summarizeFilterCriteria(criteria: GmailFilterCriteria) {
+  const parts: string[] = [];
+
+  if (criteria.from) parts.push(`from ${criteria.from}`);
+  if (criteria.to) parts.push(`to ${criteria.to}`);
+  if (criteria.subject) parts.push(`subject "${criteria.subject}"`);
+  if (criteria.query) parts.push(`query "${criteria.query}"`);
+  if (criteria.negatedQuery) parts.push(`excluding "${criteria.negatedQuery}"`);
+  if (criteria.hasAttachment) parts.push("has attachments");
+  if (criteria.excludeChats) parts.push("excluding chats");
+
+  return parts.length > 0 ? parts.join(", ") : "all matching mail";
+}
+
+function summarizeFilterAction(action: GmailFilterAction) {
+  const parts: string[] = [];
+
+  if (filterArchives(action)) parts.push("archive");
+  if (action.addLabelIds?.length) {
+    parts.push(`add labels ${action.addLabelIds.join(", ")}`);
+  }
+  if (action.removeLabelIds?.length) {
+    const remaining = action.removeLabelIds.filter((label) => label !== "INBOX");
+    if (remaining.length) {
+      parts.push(`remove labels ${remaining.join(", ")}`);
+    }
+  }
+  if (action.forward) parts.push(`forward to ${action.forward}`);
+
+  return parts.length > 0 ? parts.join("; ") : "take no visible action";
+}
+
+export function describeFilter(
+  criteria: GmailFilterCriteria,
+  action: GmailFilterAction
+): string {
+  return `If ${summarizeFilterCriteria(criteria)}, then ${summarizeFilterAction(action)}.`;
+}
+
+function summarizeExistingFilter(filter: any): GmailFilterSummary {
+  const criteria = (filter.criteria || {}) as GmailFilterCriteria;
+  const action = (filter.action || {}) as GmailFilterAction;
+
+  return {
+    id: filter.id || "",
+    criteria,
+    action,
+    archives: filterArchives(action),
+    description: describeFilter(criteria, action),
+  };
+}
+
+function getFilterMatchDetails(
+  filter: GmailFilterSummary,
+  fromEmail: string,
+  subject: string
+) {
+  const reasons: string[] = [];
+  let score = 0;
+  const normalizedSubject = normalizeSubjectForFilter(subject).toLowerCase();
+  const query = filter.criteria.query?.toLowerCase() || "";
+  const filterSubject = normalizeSubjectForFilter(
+    filter.criteria.subject || ""
+  ).toLowerCase();
+
+  if ((filter.criteria.from || "").toLowerCase() === fromEmail) {
+    score += 70;
+    reasons.push("matches this sender");
+  } else if (query.includes(`from:${fromEmail}`)) {
+    score += 55;
+    reasons.push("query already matches this sender");
+  }
+
+  if (normalizedSubject && filterSubject === normalizedSubject) {
+    score += 25;
+    reasons.push("matches this subject");
+  } else if (normalizedSubject && query.includes(normalizedSubject)) {
+    score += 15;
+    reasons.push("query mentions this subject");
+  }
+
+  if (filter.archives) {
+    score += 20;
+    reasons.push("already archives matching mail");
+  }
+
+  return {
+    score,
+    reasons,
+    isVeryClose:
+      reasons.includes("matches this sender") &&
+      (reasons.includes("matches this subject") || filter.archives),
+  };
+}
+
+function mergeArchiveAction(action?: GmailFilterAction): GmailFilterAction {
+  return {
+    addLabelIds: action?.addLabelIds,
+    forward: action?.forward,
+    removeLabelIds: Array.from(
+      new Set([...(action?.removeLabelIds || []), "INBOX"])
+    ),
+  };
+}
+
+async function getEmailMetadata(
+  tokens: any,
+  messageId: string
+): Promise<{ from: string; fromName: string; fromEmail: string; subject: string }> {
+  const gmail = getGmail(tokens);
+  const detail = await gmail.users.messages.get({
+    userId: "me",
+    id: messageId,
+    format: "metadata",
+    metadataHeaders: ["From", "Subject"],
+  });
+
+  const headers = getHeaders(detail);
+  const from = getHeaderValue(headers, "From");
+  const subject = getHeaderValue(headers, "Subject");
+  const sender = parseMailbox(from);
+
+  if (!sender.email) {
+    throw new Error("Could not determine the sender for this email");
+  }
+
+  return {
+    from,
+    fromName: sender.name || sender.email,
+    fromEmail: sender.email,
+    subject,
+  };
 }
 
 function normalizeEmailAddress(value: string): string {
@@ -353,6 +632,148 @@ export async function markAsRead(
   });
 }
 
+export async function listActiveFilters(
+  tokens: any
+): Promise<GmailFilterSummary[]> {
+  const gmail = getGmail(tokens);
+  const res = await gmail.users.settings.filters.list({ userId: "me" });
+
+  return (res.data.filter || [])
+    .map((filter) => summarizeExistingFilter(filter))
+    .sort((a, b) => Number(b.archives) - Number(a.archives));
+}
+
+export async function previewArchiveFilterForEmail(
+  tokens: any,
+  messageId: string
+): Promise<ArchiveFilterPreview> {
+  const message = await getEmailMetadata(tokens, messageId);
+  const filters = await listActiveFilters(tokens);
+  const similarFilters = filters
+    .map((filter) => {
+      const match = getFilterMatchDetails(
+        filter,
+        message.fromEmail,
+        message.subject
+      );
+      return {
+        ...filter,
+        score: match.score,
+        reasons: match.reasons,
+        isVeryClose: match.isVeryClose,
+      };
+    })
+    .filter((filter) => filter.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+
+  const suggestionOrder: FilterMatchStrategy[] = [
+    message.subject ? "fromAndSubject" : "from",
+    "from",
+  ];
+  const suggestions = Array.from(new Set(suggestionOrder)).map((strategy) => {
+    const criteria = buildArchiveFilterCriteria(
+      message.fromEmail,
+      message.subject,
+      strategy
+    );
+    return {
+      matchStrategy: strategy,
+      criteria,
+      description: describeFilter(criteria, { removeLabelIds: ["INBOX"] }),
+    };
+  });
+
+  return {
+    message,
+    recommendedStrategy: message.subject ? "fromAndSubject" : "from",
+    suggestions,
+    similarFilters,
+  };
+}
+
+export async function upsertArchiveFilterForEmail(
+  tokens: any,
+  messageId: string,
+  matchStrategy: FilterMatchStrategy,
+  existingFilterId?: string
+): Promise<{
+  operation: "created" | "replaced";
+  matchStrategy: FilterMatchStrategy;
+  filter: GmailFilterSummary;
+  replacedFilter?: GmailFilterSummary;
+}> {
+  requireScopes(tokens, [GMAIL_FILTER_WRITE_SCOPE]);
+
+  const gmail = getGmail(tokens);
+  const preview = await previewArchiveFilterForEmail(tokens, messageId);
+  const actualMatchStrategy =
+    matchStrategy === "fromAndSubject" && !preview.message.subject
+      ? "from"
+      : matchStrategy;
+  const criteria = buildArchiveFilterCriteria(
+    preview.message.fromEmail,
+    preview.message.subject,
+    actualMatchStrategy
+  );
+
+  if (!existingFilterId) {
+    const created = await gmail.users.settings.filters.create({
+      userId: "me",
+      requestBody: {
+        criteria,
+        action: { removeLabelIds: ["INBOX"] },
+      },
+    });
+
+    return {
+      operation: "created",
+      matchStrategy: actualMatchStrategy,
+      filter: summarizeExistingFilter(created.data),
+    };
+  }
+
+  const filters = await listActiveFilters(tokens);
+  const existingFilter = filters.find((filter) => filter.id === existingFilterId);
+  if (!existingFilter) {
+    throw new Error("The selected Gmail filter no longer exists");
+  }
+
+  await gmail.users.settings.filters.delete({
+    userId: "me",
+    id: existingFilterId,
+  });
+
+  try {
+    const created = await gmail.users.settings.filters.create({
+      userId: "me",
+      requestBody: {
+        criteria,
+        action: mergeArchiveAction(existingFilter.action),
+      },
+    });
+
+    return {
+      operation: "replaced",
+      matchStrategy: actualMatchStrategy,
+      filter: summarizeExistingFilter(created.data),
+      replacedFilter: existingFilter,
+    };
+  } catch (error) {
+    try {
+      await gmail.users.settings.filters.create({
+        userId: "me",
+        requestBody: {
+          criteria: existingFilter.criteria,
+          action: existingFilter.action,
+        },
+      });
+    } catch {}
+
+    throw error;
+  }
+}
+
 export async function searchEmails(
   tokens: any,
   query: string,
@@ -429,12 +850,11 @@ export async function findContact(
   for (const headers of details) {
     for (const h of headers) {
       if (!h.value) continue;
-      // Parse addresses like "Denisa Smith <denisa@example.com>" or bare "denisa@example.com"
-      const addresses = h.value.split(",").map((a) => a.trim());
+      const addresses = parseAddressList(h.value);
       for (const addr of addresses) {
-        const match = addr.match(/^(.+?)\s*<(.+?)>$/);
-        const displayName = match ? match[1].trim().replace(/^"|"$/g, "") : "";
-        const email = match ? match[2].trim().toLowerCase() : addr.trim().toLowerCase();
+        const displayName = addr.name;
+        const email = addr.email;
+        if (!email) continue;
 
         if (
           displayName.toLowerCase().includes(nameLower) ||

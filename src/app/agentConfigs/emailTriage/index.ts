@@ -60,6 +60,14 @@ NEVER invent, guess, or assume any email content. You MUST call get_email_count 
 - The user can ask to send a new email (e.g., "Send an email to Denisa"). Use find_contact to resolve the name to an email address. If multiple matches, read the top 2-3 and ask which one. Then ask what they want to say, draft it, read it back, and confirm before sending with send_new_email.
 - Always confirm recipient, subject, and body before sending a new email.
 
+# Filters
+- If the user asks what Gmail filters are active, call list_gmail_filters and summarize the relevant ones.
+- If the user wants to auto-archive emails like the current one, first call preview_archive_filter_for_email for the current message. Explain the recommended match strategy before making changes.
+- Prefer the narrower "from_and_subject" strategy unless the user clearly wants every message from that sender archived.
+- If preview_archive_filter_for_email shows a very close existing filter, offer to replace that filter instead of adding a duplicate. Be explicit that Gmail doesn't support editing filters directly, so replacing means delete-and-recreate.
+- Before calling apply_archive_filter_for_email, confirm whether they want a new filter or to replace an existing one.
+- If a filter tool says Gmail needs to be reconnected, tell the user to reconnect Gmail and do not keep retrying.
+
 # Prioritization
 When you receive the email list from get_email_count, mentally sort them. Present emails in this order:
 - URGENT first: direct asks, deadlines, board/investor emails, people issues, anything time-sensitive
@@ -399,6 +407,92 @@ You decide the order — use your judgment. The user trusts you to surface the i
           });
           if (data.error) return { error: data.error };
           return { success: true, message: "Email sent." };
+        },
+      }),
+
+      tool({
+        name: "list_gmail_filters",
+        description:
+          "List the user's active Gmail filters. Use this when the user asks what filters are currently active.",
+        parameters: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+        execute: async () => {
+          const data = await gmailApi({ action: "listFilters" });
+          if (data.error) return { error: data.error };
+          return {
+            count: data.filters?.length || 0,
+            filters: data.filters || [],
+          };
+        },
+      }),
+
+      tool({
+        name: "preview_archive_filter_for_email",
+        description:
+          "Preview archive filter options for the current email and identify close existing filters. Use this before creating or replacing a filter.",
+        parameters: {
+          type: "object",
+          properties: {
+            message_id: {
+              type: "string",
+              description: "The ID of the current email",
+            },
+          },
+          required: ["message_id"],
+          additionalProperties: false,
+        },
+        execute: async (args: any) => {
+          const data = await gmailApi({
+            action: "previewArchiveFilter",
+            messageId: args.message_id,
+          });
+          if (data.error) return data;
+          return data;
+        },
+      }),
+
+      tool({
+        name: "apply_archive_filter_for_email",
+        description:
+          "Create a new Gmail archive filter for the current email, or replace a close existing filter. Only call this after previewing and confirming with the user.",
+        parameters: {
+          type: "object",
+          properties: {
+            message_id: {
+              type: "string",
+              description: "The ID of the current email",
+            },
+            match_strategy: {
+              type: "string",
+              enum: ["from", "from_and_subject"],
+              description:
+                "How narrowly to match the current email. Use from_and_subject unless the user wants all email from that sender archived.",
+            },
+            existing_filter_id: {
+              type: "string",
+              description:
+                "Optional existing Gmail filter ID to replace instead of creating a new filter.",
+            },
+          },
+          required: ["message_id", "match_strategy"],
+          additionalProperties: false,
+        },
+        execute: async (args: any) => {
+          const data = await gmailApi({
+            action: "upsertArchiveFilter",
+            messageId: args.message_id,
+            matchStrategy:
+              args.match_strategy === "from_and_subject"
+                ? "fromAndSubject"
+                : "from",
+            existingFilterId: args.existing_filter_id,
+          });
+          if (data.error) return data;
+          return data;
         },
       }),
 
