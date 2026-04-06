@@ -11,7 +11,10 @@ export async function GET(request: NextRequest) {
     const tokens = await exchangeCode(code);
     const encrypted = encryptTokens(tokens);
 
-    const response = NextResponse.redirect(new URL("/", request.url));
+    const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || "";
+    const proto = request.headers.get("x-forwarded-proto") || "https";
+    const origin = host ? `${proto}://${host}` : request.url;
+    const response = NextResponse.redirect(new URL("/", origin));
     response.cookies.set("gmail_tokens", encrypted, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
