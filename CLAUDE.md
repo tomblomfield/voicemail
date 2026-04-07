@@ -1,3 +1,14 @@
+## Local development
+
+Environment variables are not checked into the repo. Copy from the canonical source:
+
+```
+cp /Users/tom/Code/voice-email/.env .
+```
+
+Required vars: OPENAI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, SESSION_SECRET.
+See .env.example for details.
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
