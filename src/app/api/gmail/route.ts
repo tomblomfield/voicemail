@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   createCalendarInvite,
+  updateCalendarEvent,
   hasRequiredGoogleScopes,
   inferCalendarProfile,
   getUnreadEmails,
@@ -136,6 +137,19 @@ export async function POST(request: NextRequest) {
       case "calendarSetup": {
         const profile = await inferCalendarProfile(tokens);
         return NextResponse.json({ profile });
+      }
+      case "calendarUpdate": {
+        const event = await updateCalendarEvent(tokens, {
+          eventId: params.eventId,
+          title: params.title,
+          startTime: params.startTime,
+          endTime: params.endTime,
+          timeZone: params.timeZone,
+          attendeeEmails: params.attendeeEmails,
+          notes: params.notes,
+          location: params.location,
+        });
+        return NextResponse.json({ event });
       }
       case "calendarCreate": {
         const created = await createCalendarInvite(tokens, {

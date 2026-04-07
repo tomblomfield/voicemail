@@ -446,6 +446,17 @@ export interface CalendarListOptions {
   query?: string;
 }
 
+export interface UpdateCalendarEventInput {
+  eventId: string;
+  title?: string;
+  startTime?: string;
+  endTime?: string;
+  timeZone?: string;
+  attendeeEmails?: string[];
+  notes?: string;
+  location?: string;
+}
+
 export interface CreateCalendarInviteInput {
   title: string;
   startTime: string;
@@ -1094,4 +1105,36 @@ export async function createCalendarInvite(
     event: mapCalendarEvent(response.data),
     usedProfileFields,
   };
+}
+
+export async function updateCalendarEvent(
+  tokens: any,
+  input: UpdateCalendarEventInput
+): Promise<CalendarEventSummary> {
+  const calendar = getCalendar(tokens);
+  const timeZone = input.timeZone || (await getPrimaryCalendarTimeZone(tokens));
+
+  const requestBody: any = {};
+  if (input.title !== undefined) requestBody.summary = input.title;
+  if (input.notes !== undefined) requestBody.description = input.notes;
+  if (input.location !== undefined) requestBody.location = input.location;
+  if (input.startTime !== undefined) {
+    requestBody.start = { dateTime: input.startTime, timeZone };
+  }
+  if (input.endTime !== undefined) {
+    requestBody.end = { dateTime: input.endTime, timeZone };
+  }
+  if (input.attendeeEmails !== undefined) {
+    requestBody.attendees = input.attendeeEmails.map((email) => ({ email }));
+  }
+
+  const hasAttendees = input.attendeeEmails && input.attendeeEmails.length > 0;
+  const response = await calendar.events.patch({
+    calendarId: "primary",
+    eventId: input.eventId,
+    sendUpdates: hasAttendees ? "all" : "none",
+    requestBody,
+  });
+
+  return mapCalendarEvent(response.data);
 }

@@ -93,6 +93,7 @@ NEVER invent, guess, or assume any email content. You MUST call get_email_count 
 - If the user asks "what's my home address", "what's my work address", or "what's my Zoom link", call run_calendar_setup and answer from the results.
 - When the user wants to schedule or send a calendar invite, confirm the title, date, start time, end time, attendees, and location before using create_calendar_invite.
 - If the user says "at home", "at my office", "at work", or "on Zoom", use create_calendar_invite with the matching location_preference.
+- When the user wants to edit or update an existing calendar event, use list_calendar_events to find it first, then use edit_calendar_event with only the fields that need to change.
 - Never invent a home address, work address, or Zoom link. If setup cannot infer one confidently enough, tell the user and ask for a custom location instead.
 
 # Filters
@@ -608,6 +609,72 @@ You decide the order — use your judgment. The user trusts you to surface the i
             event: data.event,
             usedProfileFields: data.usedProfileFields || [],
             message: "Calendar invite created.",
+          };
+        },
+      }),
+
+      tool({
+        name: "edit_calendar_event",
+        description:
+          "Edit an existing Google Calendar event. Use list_calendar_events first to find the event ID. Only provide the fields that need to change.",
+        parameters: {
+          type: "object",
+          properties: {
+            event_id: {
+              type: "string",
+              description: "The ID of the calendar event to edit.",
+            },
+            title: {
+              type: "string",
+              description: "New event title.",
+            },
+            start_time: {
+              type: "string",
+              description: "New start time in ISO 8601 format.",
+            },
+            end_time: {
+              type: "string",
+              description: "New end time in ISO 8601 format.",
+            },
+            time_zone: {
+              type: "string",
+              description: "Optional IANA timezone like America/Los_Angeles.",
+            },
+            attendee_emails: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Full list of attendee email addresses (replaces existing attendees).",
+            },
+            notes: {
+              type: "string",
+              description: "New event description or notes.",
+            },
+            location: {
+              type: "string",
+              description: "New event location.",
+            },
+          },
+          required: ["event_id"],
+          additionalProperties: false,
+        },
+        execute: async (args: any) => {
+          const data = await gmailApi({
+            action: "calendarUpdate",
+            eventId: args.event_id,
+            title: args.title,
+            startTime: args.start_time,
+            endTime: args.end_time,
+            timeZone: args.time_zone,
+            attendeeEmails: args.attendee_emails,
+            notes: args.notes,
+            location: args.location,
+          });
+          if (data.error) return { error: data.error };
+          return {
+            success: true,
+            event: data.event,
+            message: "Calendar event updated.",
           };
         },
       }),
