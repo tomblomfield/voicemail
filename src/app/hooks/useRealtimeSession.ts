@@ -9,6 +9,7 @@ import { applyCodecPreferences } from '../lib/codecUtils';
 import { useEvent } from '../contexts/EventContext';
 import { useHandleSessionHistory } from './useHandleSessionHistory';
 import { SessionStatus } from '../types';
+import { debugLogClient } from '../lib/debugLog';
 
 export interface RealtimeSessionCallbacks {
   onConnectionChange?: (status: SessionStatus) => void;
@@ -44,13 +45,16 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
   const historyHandlers = useHandleSessionHistory().current;
 
   function handleTransportEvent(event: any) {
+    debugLogClient("event", `transport_event: ${event.type}`, event.type === "response.audio_transcript.delta" ? { delta: event.delta?.slice?.(0, 50) } : event);
     // Handle additional server events that aren't managed by the session
     switch (event.type) {
       case "conversation.item.input_audio_transcription.completed": {
+        debugLogClient("event", "USER SAID:", event.transcript);
         historyHandlers.handleTranscriptionCompleted(event);
         break;
       }
       case "response.audio_transcript.done": {
+        debugLogClient("event", "ASSISTANT SAID:", event.transcript);
         historyHandlers.handleTranscriptionCompleted(event);
         break;
       }
@@ -61,7 +65,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
       default: {
         logServerEvent(event);
         break;
-      } 
+      }
     }
   }
 
@@ -84,6 +88,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
     const history = item.context.history;
     const lastMessage = history[history.length - 1];
     const agentName = lastMessage.name.split("transfer_to_")[1];
+    debugLogClient("event", `AGENT HANDOFF → ${agentName}`, { history: history.slice(-3) });
     callbacks.onAgentHandoff?.(agentName);
   };
 
@@ -91,6 +96,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
     if (sessionRef.current) {
       // Log server errors
       sessionRef.current.on("error", (...args: any[]) => {
+        debugLogClient("error", "SESSION ERROR", args[0]);
         logServerEvent({
           type: "error",
           message: args[0],
@@ -99,11 +105,23 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
 
       // history events
       sessionRef.current.on("agent_handoff", handleAgentHandoff);
-      sessionRef.current.on("agent_tool_start", historyHandlers.handleAgentToolStart);
-      sessionRef.current.on("agent_tool_end", historyHandlers.handleAgentToolEnd);
+      sessionRef.current.on("agent_tool_start", (details: any, agent: any, functionCall: any) => {
+        debugLogClient("tool", `TOOL START: ${functionCall?.name}`, { args: functionCall?.arguments });
+        historyHandlers.handleAgentToolStart(details, agent, functionCall);
+      });
+      sessionRef.current.on("agent_tool_end", (details: any, agent: any, functionCall: any, result: any) => {
+        debugLogClient("tool", `TOOL END: ${functionCall?.name}`, { result });
+        historyHandlers.handleAgentToolEnd(details, agent, functionCall, result);
+      });
       sessionRef.current.on("history_updated", historyHandlers.handleHistoryUpdated);
-      sessionRef.current.on("history_added", historyHandlers.handleHistoryAdded);
-      sessionRef.current.on("guardrail_tripped", historyHandlers.handleGuardrailTripped);
+      sessionRef.current.on("history_added", (item: any) => {
+        debugLogClient("event", "HISTORY ADDED", item);
+        historyHandlers.handleHistoryAdded(item);
+      });
+      sessionRef.current.on("guardrail_tripped", (details: any, agent: any, guardrail: any) => {
+        debugLogClient("error", "GUARDRAIL TRIPPED", guardrail);
+        historyHandlers.handleGuardrailTripped(details, agent, guardrail);
+      });
 
       // additional transport events
       sessionRef.current.on("transport_event", handleTransportEvent);
@@ -144,7 +162,9 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
         context: extraContext ?? {},
       });
 
+      debugLogClient("event", "Connecting to OpenAI realtime...", { model: 'gpt-4o-realtime-preview-2025-06-03' });
       await sessionRef.current.connect({ apiKey: ek });
+      debugLogClient("event", "Connected to OpenAI realtime ✓");
       updateStatus('CONNECTED');
     },
     [callbacks, updateStatus],

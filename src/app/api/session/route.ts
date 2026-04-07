@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { decryptTokens, hasRequiredGoogleScopes } from "@/app/lib/gmail";
 import { google } from "googleapis";
+import { debugLog } from "@/app/lib/debugLog";
 
 export async function GET(request: NextRequest) {
   const cookie = request.cookies.get("gmail_tokens");
@@ -27,6 +28,7 @@ export async function GET(request: NextRequest) {
     } catch {
       console.log("session_started: unknown_user");
     }
+    debugLog("api", "Creating OpenAI realtime session...");
     const response = await fetch(
       "https://api.openai.com/v1/realtime/sessions",
       {
@@ -41,6 +43,7 @@ export async function GET(request: NextRequest) {
       }
     );
     const data = await response.json();
+    debugLog("api", "OpenAI realtime session created", { id: data.id, model: data.model, expires_at: data.expires_at });
     return NextResponse.json(data);
   } catch (error) {
     console.error("Error in /session:", error);

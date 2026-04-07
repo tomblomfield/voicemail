@@ -20,6 +20,7 @@ import {
   previewArchiveFilterForEmail,
   upsertArchiveFilterForEmail,
 } from "@/app/lib/gmail";
+import { debugLog } from "@/app/lib/debugLog";
 
 function getTokens(request: NextRequest) {
   const cookie = request.cookies.get("gmail_tokens");
@@ -35,6 +36,7 @@ function getTokens(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const tokens = getTokens(request);
   if (!tokens) {
+    debugLog("api", "POST /api/gmail — UNAUTHORIZED (no valid tokens)");
     return NextResponse.json(
       { error: "Not authenticated. Please reconnect your Google account." },
       { status: 401 }
@@ -42,21 +44,30 @@ export async function POST(request: NextRequest) {
   }
 
   const { action, ...params } = await request.json();
+  debugLog("api", `POST /api/gmail — action=${action}`, params);
+  const startMs = Date.now();
+
+  function respond(data: any, status = 200) {
+    const elapsed = Date.now() - startMs;
+    debugLog("api", `POST /api/gmail — action=${action} DONE [${elapsed}ms]`, data);
+    return NextResponse.json(data, { status });
+  }
 
   try {
     switch (action) {
       case "list": {
         const emails = await getUnreadEmails(tokens, params.maxResults || 10);
         const userEmail = await getUserEmail(tokens);
-        // Filter out emails where the user is the most recent sender (nothing to act on)
         const actionable = emails.filter(
           (e) => !e.from.toLowerCase().includes(userEmail.toLowerCase())
         );
-        return NextResponse.json({ emails: actionable });
+        debugLog("api", `list: ${emails.length} total, ${actionable.length} actionable`);
+        return respond({ emails: actionable });
       }
       case "read": {
         const body = await getEmailBody(tokens, params.messageId);
-        return NextResponse.json({ body });
+        debugLog("api", `read: body length=${body?.length || 0}`);
+        return respond({ body });
       }
       case "readThread": {
         const messages = await getThreadMessages(
@@ -64,7 +75,8 @@ export async function POST(request: NextRequest) {
           params.threadId,
           params.maxMessages || 5
         );
-        return NextResponse.json({ messages });
+        debugLog("api", `readThread: ${messages.length} messages`);
+        return respond({ messages });
       }
       case "reply": {
         const userEmail = await getUserEmail(tokens);
@@ -75,26 +87,27 @@ export async function POST(request: NextRequest) {
           params.body,
           userEmail
         );
-        return NextResponse.json({ success: true });
+        return respond({ success: true });
       }
       case "archive": {
         await archiveEmail(tokens, params.messageId);
-        return NextResponse.json({ success: true });
+        return respond({ success: true });
       }
       case "markRead": {
         await markAsRead(tokens, params.messageId);
-        return NextResponse.json({ success: true });
+        return respond({ success: true });
       }
       case "listFilters": {
         const filters = await listActiveFilters(tokens);
-        return NextResponse.json({ filters });
+        debugLog("api", `listFilters: ${filters.length} filters`);
+        return respond({ filters });
       }
       case "previewArchiveFilter": {
         const preview = await previewArchiveFilterForEmail(
           tokens,
           params.messageId
         );
-        return NextResponse.json(preview);
+        return respond(preview);
       }
       case "upsertArchiveFilter": {
         const result = await upsertArchiveFilterForEmail(
@@ -103,15 +116,17 @@ export async function POST(request: NextRequest) {
           params.matchStrategy,
           params.existingFilterId
         );
-        return NextResponse.json(result);
+        return respond(result);
       }
       case "search": {
         const emails = await searchEmails(tokens, params.query, params.maxResults || 10);
-        return NextResponse.json({ emails });
+        debugLog("api", `search: ${emails.length} results for query="${params.query}"`);
+        return respond({ emails });
       }
       case "findContact": {
         const contacts = await findContact(tokens, params.name);
-        return NextResponse.json({ contacts });
+        debugLog("api", `findContact: ${contacts.length} matches for "${params.name}"`);
+        return respond({ contacts });
       }
       case "compose": {
         const userEmail = await getUserEmail(tokens);
@@ -122,22 +137,27 @@ export async function POST(request: NextRequest) {
           params.body,
           userEmail
         );
-        return NextResponse.json({ success: true });
+        return respond({ success: true });
       }
       case "calendarList": {
+        debugLog("calendar", "calendarList request", { startTime: params.startTime, endTime: params.endTime, query: params.query });
         const events = await listCalendarEvents(tokens, {
           startTime: params.startTime,
           endTime: params.endTime,
           maxResults: params.maxResults || 10,
           query: params.query,
         });
-        return NextResponse.json({ events });
+        debugLog("calendar", `calendarList: ${events.length} events`, events);
+        return respond({ events });
       }
       case "calendarSetup": {
+        debugLog("calendar", "calendarSetup: inferring profile from past events...");
         const profile = await inferCalendarProfile(tokens);
-        return NextResponse.json({ profile });
+        debugLog("calendar", "calendarSetup: profile inferred", profile);
+        return respond({ profile });
       }
       case "calendarCreate": {
+        debugLog("calendar", "calendarCreate request", params);
         const created = await createCalendarInvite(tokens, {
           title: params.title,
           startTime: params.startTime,
@@ -149,16 +169,20 @@ export async function POST(request: NextRequest) {
           locationPreference: params.locationPreference,
           inferredProfile: params.inferredProfile,
         });
-        return NextResponse.json(created);
+        debugLog("calendar", "calendarCreate: event created", created);
+        return respond(created);
       }
       default:
+        debugLog("error", `Unknown action: ${action}`);
         return NextResponse.json(
           { error: `Unknown action: ${action}` },
           { status: 400 }
         );
     }
   } catch (error: any) {
+    const elapsed = Date.now() - startMs;
     if (error instanceof GmailScopeError) {
+      debugLog("error", `Gmail scope error (${action}) [${elapsed}ms]`, { missingScopes: error.missingScopes });
       return NextResponse.json(
         {
           error: "Reconnect Gmail to grant filter-management access.",
@@ -168,6 +192,7 @@ export async function POST(request: NextRequest) {
         { status: 403 }
       );
     }
+    debugLog("error", `Google API error (${action}) [${elapsed}ms]`, { message: error.message, stack: error.stack });
     console.error(`Google API error (${action}): ${error.message || "unknown"}`);
 
     return NextResponse.json(

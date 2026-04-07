@@ -1,13 +1,18 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import type { InferredCalendarProfile } from "@/app/lib/calendar";
+import { debugLogClient } from "@/app/lib/debugLog";
 
 async function gmailApi(body: Record<string, any>) {
+  debugLogClient("tool", `gmailApi request: action=${body.action}`, body);
+  const startMs = Date.now();
   const res = await fetch("/api/gmail", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return res.json();
+  const data = await res.json();
+  debugLogClient("tool", `gmailApi response: action=${body.action} [${Date.now() - startMs}ms] status=${res.status}`, data);
+  return data;
 }
 
 export interface EmailData {
@@ -130,9 +135,15 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async () => {
+          debugLogClient("tool", "run_calendar_setup: executing");
           const result = await getOrLoadCalendarProfile();
-          if ("error" in result) return { error: result.error };
-          return summarizeCalendarProfile(result.profile, result.cached);
+          if ("error" in result) {
+            debugLogClient("error", "run_calendar_setup: failed", result.error);
+            return { error: result.error };
+          }
+          const summary = summarizeCalendarProfile(result.profile, result.cached);
+          debugLogClient("tool", "run_calendar_setup: result", summary);
+          return summary;
         },
       }),
 
@@ -147,11 +158,15 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async () => {
+          debugLogClient("tool", "get_email_count: executing");
           const data = await gmailApi({ action: "list", maxResults: 50 });
-          if (data.error) return { error: data.error };
+          if (data.error) {
+            debugLogClient("error", "get_email_count: failed", data.error);
+            return { error: data.error };
+          }
           const emails = data.emails || [];
           deps.setEmails(emails);
-          return {
+          const result = {
             count: emails.length,
             emails: emails.map((e: any) => ({
               id: e.id,
@@ -163,6 +178,8 @@ You decide the order — use your judgment. The user trusts you to surface the i
               date: e.date,
             })),
           };
+          debugLogClient("tool", `get_email_count: ${emails.length} emails`, result);
+          return result;
         },
       }),
 
@@ -183,6 +200,7 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          debugLogClient("tool", "get_next_email: executing", args);
           const emails = deps.emails();
           if (emails.length === 0) {
             const summary = deps.getActionSummary();
@@ -248,7 +266,7 @@ You decide the order — use your judgment. The user trusts you to surface the i
             conversationContext = bodyData.body || email.snippet;
           }
 
-          return {
+          const emailResult = {
             id: email.id,
             threadId: email.threadId,
             from: email.from,
@@ -259,6 +277,8 @@ You decide the order — use your judgment. The user trusts you to surface the i
             threadLength: threadMessages.length,
             body: conversationContext,
           };
+          debugLogClient("tool", `get_next_email: returning email from=${email.from} subject="${email.subject}"`, { ...emailResult, body: emailResult.body.slice(0, 200) + "..." });
+          return emailResult;
         },
       }),
 
@@ -286,18 +306,20 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          debugLogClient("tool", "reply_to_email: executing", args);
           const data = await gmailApi({
             action: "reply",
             messageId: args.message_id,
             threadId: args.thread_id,
             body: args.reply_text,
           });
-          if (data.error) return { error: data.error };
+          if (data.error) { debugLogClient("error", "reply_to_email: failed", data.error); return { error: data.error }; }
           await gmailApi({
             action: "archive",
             messageId: args.message_id,
           });
           deps.recordAction("reply");
+          debugLogClient("tool", "reply_to_email: success");
           return { success: true, message: "Reply sent and email archived." };
         },
       }),
@@ -318,12 +340,14 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          debugLogClient("tool", "archive_email: executing", args);
           const data = await gmailApi({
             action: "archive",
             messageId: args.message_id,
           });
-          if (data.error) return { error: data.error };
+          if (data.error) { debugLogClient("error", "archive_email: failed", data.error); return { error: data.error }; }
           deps.recordAction("archive");
+          debugLogClient("tool", "archive_email: success");
           return { success: true, message: "Email archived." };
         },
       }),
@@ -344,12 +368,14 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          debugLogClient("tool", "skip_email: executing", args);
           const data = await gmailApi({
             action: "markRead",
             messageId: args.message_id,
           });
-          if (data.error) return { error: data.error };
+          if (data.error) { debugLogClient("error", "skip_email: failed", data.error); return { error: data.error }; }
           deps.recordAction("skip");
+          debugLogClient("tool", "skip_email: success");
           return { success: true, message: "Email marked as read." };
         },
       }),
@@ -375,13 +401,14 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          debugLogClient("tool", "search_emails: executing", args);
           const data = await gmailApi({
             action: "search",
             query: args.query,
             maxResults: args.max_results || 5,
           });
-          if (data.error) return { error: data.error };
-          return {
+          if (data.error) { debugLogClient("error", "search_emails: failed", data.error); return { error: data.error }; }
+          const result = {
             count: data.emails?.length || 0,
             emails: (data.emails || []).map((e: any) => ({
               id: e.id,
@@ -393,6 +420,8 @@ You decide the order — use your judgment. The user trusts you to surface the i
               date: e.date,
             })),
           };
+          debugLogClient("tool", `search_emails: ${result.count} results`, result);
+          return result;
         },
       }),
 
@@ -412,18 +441,21 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          debugLogClient("tool", "find_contact: executing", args);
           const data = await gmailApi({
             action: "findContact",
             name: args.name,
           });
-          if (data.error) return { error: data.error };
-          return {
+          if (data.error) { debugLogClient("error", "find_contact: failed", data.error); return { error: data.error }; }
+          const result = {
             contacts: data.contacts || [],
             message:
               data.contacts?.length > 0
                 ? `Found ${data.contacts.length} match(es). The most frequent contact is ${data.contacts[0].name} <${data.contacts[0].email}>.`
                 : "No contacts found with that name.",
           };
+          debugLogClient("tool", `find_contact: ${result.contacts.length} matches`, result);
+          return result;
         },
       }),
 
@@ -451,13 +483,15 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          debugLogClient("tool", "send_new_email: executing", args);
           const data = await gmailApi({
             action: "compose",
             to: args.to,
             subject: args.subject,
             body: args.body,
           });
-          if (data.error) return { error: data.error };
+          if (data.error) { debugLogClient("error", "send_new_email: failed", data.error); return { error: data.error }; }
+          debugLogClient("tool", "send_new_email: success");
           return { success: true, message: "Email sent." };
         },
       }),
@@ -490,6 +524,7 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          debugLogClient("tool", "list_calendar_events: executing", args);
           const data = await gmailApi({
             action: "calendarList",
             startTime: args.start_time,
@@ -497,8 +532,8 @@ You decide the order — use your judgment. The user trusts you to surface the i
             query: args.query,
             maxResults: args.max_results || 10,
           });
-          if (data.error) return { error: data.error };
-          return {
+          if (data.error) { debugLogClient("error", "list_calendar_events: failed", data.error); return { error: data.error }; }
+          const result = {
             count: data.events?.length || 0,
             events: (data.events || []).map((event: any) => ({
               id: event.id,
@@ -510,6 +545,8 @@ You decide the order — use your judgment. The user trusts you to surface the i
               htmlLink: event.htmlLink,
             })),
           };
+          debugLogClient("tool", `list_calendar_events: ${result.count} events`, result);
+          return result;
         },
       }),
 
@@ -580,13 +617,15 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          debugLogClient("tool", "create_calendar_invite: executing", args);
           let inferredProfile = deps.calendarProfile();
           if (
             !inferredProfile &&
             ["home", "work", "zoom"].includes(args.location_preference)
           ) {
+            debugLogClient("tool", "create_calendar_invite: loading calendar profile first");
             const setup = await getOrLoadCalendarProfile();
-            if ("error" in setup) return { error: setup.error };
+            if ("error" in setup) { debugLogClient("error", "create_calendar_invite: profile load failed", setup.error); return { error: setup.error }; }
             inferredProfile = setup.profile;
           }
 
@@ -602,13 +641,15 @@ You decide the order — use your judgment. The user trusts you to surface the i
             customLocation: args.custom_location,
             inferredProfile,
           });
-          if (data.error) return { error: data.error };
-          return {
+          if (data.error) { debugLogClient("error", "create_calendar_invite: failed", data.error); return { error: data.error }; }
+          const result = {
             success: true,
             event: data.event,
             usedProfileFields: data.usedProfileFields || [],
             message: "Calendar invite created.",
           };
+          debugLogClient("tool", "create_calendar_invite: success", result);
+          return result;
         },
       }),
 
