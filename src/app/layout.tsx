@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import "./lib/envSetup";
 
 export const metadata: Metadata = {
   title: "Voicemail AI",

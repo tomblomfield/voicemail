@@ -10,9 +10,3 @@ For personal use, risk is low. For multi-user deployment, this becomes a real at
 **Depends on:** Classification implementation
 **Added:** 2026-04-06 via /plan-ceo-review
 
-## P3: Update voicemail footer URL when domain changes
-
-The voicemail email footer hardcodes `https://voice-email-production.up.railway.app` as the production URL (in `PROD_URL` constant in `src/app/lib/gmail.ts`). When we move to a custom domain, update this constant.
-
-**Effort:** XS
-**Added:** 2026-04-06
