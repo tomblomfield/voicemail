@@ -2,3 +2,5 @@
 node_modules/
 .next/
 token.json
+.specific
+specific.local

@@ -1,6 +1,6 @@
 # Voicemail AI
 
-**[Try it live](https://voice-email-production.up.railway.app)** — connect your Gmail and triage your inbox by voice in under 60 seconds.
+**[Try it live](https://blue-dog.spcf.app)** <!-- TODO: replace with your own Specific deployment URL --> — connect your Gmail and triage your inbox by voice in under 60 seconds.
 
 ---
 
@@ -38,29 +38,35 @@ npm install
 4. Enable the **Gmail API** at [APIs & Services → Library → Gmail API](https://console.cloud.google.com/apis/library/gmail.googleapis.com)
 5. Enable the **Google Calendar API** at [APIs & Services → Library → Google Calendar API](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com)
 
-### 3. Configure environment variables
+### 3. Install the [Specific](https://specific.dev) CLI
 
 ```bash
-cp .env.example .env
+curl -fsSL https://specific.dev/install.sh | sh
 ```
 
-Edit `.env` and fill in your keys:
+### 4. Run locally
 
-| Variable | Description |
+```bash
+specific dev
+```
+
+On first run, you'll be prompted to enter your secrets:
+
+| Secret | Description |
 |---|---|
-| `OPENAI_API_KEY` | Your OpenAI API key |
-| `GOOGLE_CLIENT_ID` | OAuth 2.0 client ID from Google Cloud Console |
-| `GOOGLE_CLIENT_SECRET` | OAuth 2.0 client secret from Google Cloud Console |
-| `GOOGLE_REDIRECT_URI` | `http://localhost:3000/api/auth/callback` (default) |
-| `VOICEMAIL_SITE_URL` | Optional footer link used in outbound emails |
+| `openai_api_key` | Your OpenAI API key |
+| `google_client_id` | OAuth 2.0 client ID from Google Cloud Console |
+| `google_client_secret` | OAuth 2.0 client secret from Google Cloud Console |
 
-### 4. Run
+`SESSION_SECRET` is auto-generated. `GOOGLE_REDIRECT_URI` and `VOICEMAIL_SITE_URL` are derived automatically from the service URL.
+
+### 5. Deploy to [Specific Cloud](https://specific.dev)
 
 ```bash
-npm run dev
+specific deploy
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+The public URL will be printed once the deploy completes. Manage the service at [dashboard.specific.dev](https://dashboard.specific.dev).
 
 ## Usage
 

@@ -365,9 +365,6 @@ export function shouldAddVoicemailFooter(userEmail: string): boolean {
   return FOOTER_ELIGIBLE_SENDERS.has(normalizeEmailAddress(userEmail));
 }
 
-// TODO: Update this to the real prod domain when we change it
-const PROD_URL = "https://voice-email-production.up.railway.app";
-
 export function getVoicemailSiteUrl(): string {
   const candidates = [
     process.env.VOICEMAIL_SITE_URL,
@@ -381,7 +378,7 @@ export function getVoicemailSiteUrl(): string {
     if (url) return url;
   }
 
-  return PROD_URL;
+  return "";
 }
 
 export function appendVoicemailFooter(body: string, userEmail: string): string {
