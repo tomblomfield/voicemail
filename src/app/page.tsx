@@ -323,6 +323,12 @@ export default function HomePage() {
         <div className="max-w-3xl mx-auto px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-gray-500">
           <div className="font-medium text-gray-400">Voicemail AI</div>
           <div className="flex items-center gap-6">
+            <Link href="/privacy" className="hover:text-gray-300 transition-colors">
+              Privacy
+            </Link>
+            <Link href="/terms" className="hover:text-gray-300 transition-colors">
+              Terms
+            </Link>
             <a
               href="https://github.com/tomblomfield/voicemail"
               target="_blank"
@@ -331,7 +337,6 @@ export default function HomePage() {
             >
               GitHub
             </a>
-            <span>MIT License</span>
           </div>
         </div>
       </footer>
