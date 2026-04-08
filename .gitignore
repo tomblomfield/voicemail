@@ -3,3 +3,4 @@ node_modules/
 .next/
 token.json
 debug.log
+.gstack/
