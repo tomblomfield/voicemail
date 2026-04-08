@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { decryptTokens, hasRequiredGoogleScopes } from "@/app/lib/gmail";
 import { google } from "googleapis";
 import { debugLog } from "@/app/lib/debugLog";
-import { initDb, upsertUser } from "@/app/lib/db";
+import { initDb, upsertUser, isDbAvailable } from "@/app/lib/db";
 
 export async function GET(request: NextRequest) {
   const cookie = request.cookies.get("gmail_tokens");
@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
       const profile = await gmail.users.getProfile({ userId: "me" });
       const email = profile.data.emailAddress;
       console.log(`session_started: ${email}`);
-      if (email) {
+      if (email && isDbAvailable()) {
         await initDb();
         await upsertUser(email);
       }
@@ -50,7 +50,7 @@ export async function GET(request: NextRequest) {
     );
     const data = await response.json();
     debugLog("api", "OpenAI realtime session created", { id: data.id, model: data.model, expires_at: data.expires_at });
-    return NextResponse.json(data);
+    return NextResponse.json({ ...data, dbAvailable: isDbAvailable() });
   } catch (error) {
     console.error("Error in /session:", error);
     return NextResponse.json(

@@ -1,11 +1,19 @@
 import { Pool } from "pg";
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 10,
-});
+// Pool is only created when DATABASE_URL is set.
+// All exported functions gracefully degrade when Postgres is unavailable.
+const pool: Pool | null = process.env.DATABASE_URL
+  ? new Pool({ connectionString: process.env.DATABASE_URL, max: 10 })
+  : null;
+
+function isDbAvailable(): boolean {
+  return pool !== null;
+}
+
+export { isDbAvailable };
 
 export async function initDb(): Promise<void> {
+  if (!pool) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -32,7 +40,8 @@ export async function initDb(): Promise<void> {
 
 // --- Users ---
 
-export async function upsertUser(email: string): Promise<{ id: string; email: string }> {
+export async function upsertUser(email: string): Promise<{ id: string; email: string } | null> {
+  if (!pool) return null;
   const result = await pool.query(
     `INSERT INTO users (email, last_session_at)
      VALUES ($1, NOW())
@@ -44,6 +53,7 @@ export async function upsertUser(email: string): Promise<{ id: string; email: st
 }
 
 export async function getUserByEmail(email: string) {
+  if (!pool) return null;
   const result = await pool.query(
     `SELECT id, email, home_address, work_address, phone_number, conference_link,
             created_at, last_session_at, updated_at
@@ -62,6 +72,7 @@ export async function updateUserProfile(
     conferenceLink?: string | null;
   }
 ): Promise<void> {
+  if (!pool) return;
   const setClauses: string[] = ["updated_at = NOW()"];
   const values: any[] = [];
   let paramIndex = 1;
@@ -94,6 +105,7 @@ export async function updateUserProfile(
 // --- Memories ---
 
 export async function getUserMemories(email: string): Promise<string | null> {
+  if (!pool) return null;
   const result = await pool.query(
     `SELECT m.content FROM user_memories m
      JOIN users u ON u.id = m.user_id
@@ -104,6 +116,7 @@ export async function getUserMemories(email: string): Promise<string | null> {
 }
 
 export async function saveUserMemories(email: string, content: string): Promise<void> {
+  if (!pool) return;
   await pool.query(
     `INSERT INTO user_memories (user_id, content)
      SELECT id, $2 FROM users WHERE email = $1
@@ -115,6 +128,7 @@ export async function saveUserMemories(email: string, content: string): Promise<
 // --- Signups log ---
 
 export async function getAllUsers(): Promise<Array<{ email: string; created_at: Date; last_session_at: Date }>> {
+  if (!pool) return [];
   const result = await pool.query(
     `SELECT email, created_at, last_session_at FROM users ORDER BY created_at DESC`
   );

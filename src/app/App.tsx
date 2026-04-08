@@ -88,7 +88,7 @@ function App() {
       );
   }, []);
 
-  const fetchEphemeralKey = async (): Promise<string | null> => {
+  const fetchSessionData = async (): Promise<{ key: string; dbAvailable: boolean } | null> => {
     logClientEvent({ url: "/session" }, "fetch_session_token_request");
     const tokenResponse = await fetch("/api/session");
     const data = await tokenResponse.json();
@@ -101,7 +101,7 @@ function App() {
       return null;
     }
 
-    return data.client_secret.value;
+    return { key: data.client_secret.value, dbAvailable: !!data.dbAvailable };
   };
 
   const handleSessionDrop = useCallback(async () => {
@@ -141,14 +141,14 @@ function App() {
       const opts = connectOptionsRef.current;
       if (!opts) return;
 
-      const EPHEMERAL_KEY = await fetchEphemeralKey();
-      if (!EPHEMERAL_KEY) {
+      const session = await fetchSessionData();
+      if (!session) {
         handleSessionDrop();
         return;
       }
 
       await connect({
-        getEphemeralKey: async () => EPHEMERAL_KEY,
+        getEphemeralKey: async () => session.key,
         initialAgents: [opts.agent],
         audioElement: sdkAudioElement,
         extraContext: { addTranscriptBreadcrumb },
@@ -220,6 +220,9 @@ function App() {
       actionsRef.current = { replied: 0, skipped: 0, archived: 0, blocked: 0, unsubscribed: 0 };
       calendarProfileRef.current = null;
 
+      const session = await fetchSessionData();
+      if (!session) return;
+
       // Create agent with deps — emails will be populated by get_email_count tool
       const actionKeyMap = { reply: "replied", skip: "skipped", archive: "archived", block: "blocked", unsubscribe: "unsubscribed" } as const;
       const agent = createEmailTriageAgent({
@@ -239,15 +242,13 @@ function App() {
         setCalendarProfile: (profile) => {
           calendarProfileRef.current = profile;
         },
+        dbAvailable: session.dbAvailable,
       });
-
-      const EPHEMERAL_KEY = await fetchEphemeralKey();
-      if (!EPHEMERAL_KEY) return;
 
       connectOptionsRef.current = { agent };
 
       await connect({
-        getEphemeralKey: async () => EPHEMERAL_KEY,
+        getEphemeralKey: async () => session.key,
         initialAgents: [agent],
         audioElement: sdkAudioElement,
         extraContext: { addTranscriptBreadcrumb },

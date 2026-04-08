@@ -36,6 +36,7 @@ export interface EmailTriageDeps {
   getActionSummary: () => { replied: number; skipped: number; archived: number; blocked: number; unsubscribed: number };
   calendarProfile: () => InferredCalendarProfile | null;
   setCalendarProfile: (profile: InferredCalendarProfile) => void;
+  dbAvailable: boolean;
 }
 
 export function createEmailTriageAgent(deps: EmailTriageDeps) {
@@ -105,7 +106,7 @@ NEVER invent, guess, or assume any email content. You MUST call get_email_count 
 - When the user wants to delete or cancel a calendar event, use list_calendar_events to find it first, then ALWAYS confirm with the user before calling delete_calendar_event. Tell them whether attendees will be notified.
 - Never invent a home address, work address, or Zoom link. If setup cannot infer one confidently enough, tell the user and ask for a custom location instead.
 
-# Profile
+${deps.dbAvailable ? `# Profile
 - The user has a saved profile with home address, work address, phone number, and conference link.
 - If the user asks "what's my home address?" or similar, call get_my_profile to look it up.
 - If the user says "my home address is 123 Main St" or "update my phone number to ...", call update_my_profile with the relevant fields.
@@ -115,8 +116,7 @@ NEVER invent, guess, or assume any email content. You MUST call get_email_count 
 - You can save and recall freeform notes across sessions using get_memories and save_memories.
 - If the user says "remember that...", "make a note...", or "save this for later", first call get_memories to read existing content, then call save_memories with the updated content (existing + new).
 - If the user asks "what do you remember?" or "do you have any notes?", call get_memories.
-- Never overwrite memories — always append or edit specific entries.
-
+- Never overwrite memories — always append or edit specific entries.` : ''}
 # Filters
 - If the user asks what Gmail filters are active, call list_gmail_filters and summarize the relevant ones.
 - If the user wants to auto-archive emails like the current one, first call preview_archive_filter_for_email for the current message. Explain the recommended match strategy before making changes.
@@ -909,112 +909,114 @@ You decide the order — use your judgment. The user trusts you to surface the i
         },
       }),
 
-      tool({
-        name: "get_my_profile",
-        description:
-          "Retrieve the user's saved profile: home address, work address, phone number, and conference link. Use this when the user asks 'what's my home address?', 'what's my phone number?', etc.",
-        parameters: {
-          type: "object",
-          properties: {},
-          required: [],
-          additionalProperties: false,
-        },
-        execute: async () => {
-          debugLogClient("tool", "get_my_profile: executing");
-          const data = await gmailApi({ action: "getProfile" });
-          if (data.error) { debugLogClient("error", "get_my_profile: failed", data.error); return { error: data.error }; }
-          debugLogClient("tool", "get_my_profile: success", data);
-          return data;
-        },
-      }),
-
-      tool({
-        name: "update_my_profile",
-        description:
-          "Update the user's saved profile. Use this when the user says 'my home address is...', 'update my phone number to...', 'my Zoom link is...', etc. Only provide the fields that need to change.",
-        parameters: {
-          type: "object",
-          properties: {
-            home_address: {
-              type: "string",
-              description: "The user's home address.",
-            },
-            work_address: {
-              type: "string",
-              description: "The user's work address.",
-            },
-            phone_number: {
-              type: "string",
-              description: "The user's phone number.",
-            },
-            conference_link: {
-              type: "string",
-              description: "The user's preferred video conference link (e.g. Zoom, Google Meet).",
-            },
+      ...(deps.dbAvailable ? [
+        tool({
+          name: "get_my_profile",
+          description:
+            "Retrieve the user's saved profile: home address, work address, phone number, and conference link. Use this when the user asks 'what's my home address?', 'what's my phone number?', etc.",
+          parameters: {
+            type: "object",
+            properties: {},
+            required: [],
+            additionalProperties: false,
           },
-          required: [],
-          additionalProperties: false,
-        },
-        execute: async (args: any) => {
-          debugLogClient("tool", "update_my_profile: executing", args);
-          const data = await gmailApi({
-            action: "updateProfile",
-            homeAddress: args.home_address,
-            workAddress: args.work_address,
-            phoneNumber: args.phone_number,
-            conferenceLink: args.conference_link,
-          });
-          if (data.error) { debugLogClient("error", "update_my_profile: failed", data.error); return { error: data.error }; }
-          debugLogClient("tool", "update_my_profile: success");
-          return { success: true, message: "Profile updated." };
-        },
-      }),
-
-      tool({
-        name: "get_memories",
-        description:
-          "Retrieve the user's saved memories — a freeform notes document the user has asked you to remember. Use this when the user asks 'what do you remember about me?', 'do you have any notes?', or when you need context from previous sessions.",
-        parameters: {
-          type: "object",
-          properties: {},
-          required: [],
-          additionalProperties: false,
-        },
-        execute: async () => {
-          debugLogClient("tool", "get_memories: executing");
-          const data = await gmailApi({ action: "getMemories" });
-          if (data.error) { debugLogClient("error", "get_memories: failed", data.error); return { error: data.error }; }
-          debugLogClient("tool", "get_memories: success");
-          return { memories: data.memories || "No memories saved yet." };
-        },
-      }),
-
-      tool({
-        name: "save_memories",
-        description:
-          "Save or update the user's memories. This is a freeform markdown document that persists across sessions. Use this when the user says 'remember that...', 'make a note that...', or asks you to save something for later. Always read existing memories first with get_memories, then append or update rather than overwriting.",
-        parameters: {
-          type: "object",
-          properties: {
-            content: {
-              type: "string",
-              description: "The full updated markdown content to save. Include all existing memories plus any additions.",
-            },
+          execute: async () => {
+            debugLogClient("tool", "get_my_profile: executing");
+            const data = await gmailApi({ action: "getProfile" });
+            if (data.error) { debugLogClient("error", "get_my_profile: failed", data.error); return { error: data.error }; }
+            debugLogClient("tool", "get_my_profile: success", data);
+            return data;
           },
-          required: ["content"],
-          additionalProperties: false,
-        },
-        execute: async (args: any) => {
-          debugLogClient("tool", "save_memories: executing", args);
-          const data = await gmailApi({
-            action: "saveMemories",
-            content: args.content,
-          });
-          if (data.error) { debugLogClient("error", "save_memories: failed", data.error); return { error: data.error }; }
-          debugLogClient("tool", "save_memories: success");
-          return { success: true, message: "Memories saved." };
-        },
-      }),
+        }),
+
+        tool({
+          name: "update_my_profile",
+          description:
+            "Update the user's saved profile. Use this when the user says 'my home address is...', 'update my phone number to...', 'my Zoom link is...', etc. Only provide the fields that need to change.",
+          parameters: {
+            type: "object",
+            properties: {
+              home_address: {
+                type: "string",
+                description: "The user's home address.",
+              },
+              work_address: {
+                type: "string",
+                description: "The user's work address.",
+              },
+              phone_number: {
+                type: "string",
+                description: "The user's phone number.",
+              },
+              conference_link: {
+                type: "string",
+                description: "The user's preferred video conference link (e.g. Zoom, Google Meet).",
+              },
+            },
+            required: [],
+            additionalProperties: false,
+          },
+          execute: async (args: any) => {
+            debugLogClient("tool", "update_my_profile: executing", args);
+            const data = await gmailApi({
+              action: "updateProfile",
+              homeAddress: args.home_address,
+              workAddress: args.work_address,
+              phoneNumber: args.phone_number,
+              conferenceLink: args.conference_link,
+            });
+            if (data.error) { debugLogClient("error", "update_my_profile: failed", data.error); return { error: data.error }; }
+            debugLogClient("tool", "update_my_profile: success");
+            return { success: true, message: "Profile updated." };
+          },
+        }),
+
+        tool({
+          name: "get_memories",
+          description:
+            "Retrieve the user's saved memories — a freeform notes document the user has asked you to remember. Use this when the user asks 'what do you remember about me?', 'do you have any notes?', or when you need context from previous sessions.",
+          parameters: {
+            type: "object",
+            properties: {},
+            required: [],
+            additionalProperties: false,
+          },
+          execute: async () => {
+            debugLogClient("tool", "get_memories: executing");
+            const data = await gmailApi({ action: "getMemories" });
+            if (data.error) { debugLogClient("error", "get_memories: failed", data.error); return { error: data.error }; }
+            debugLogClient("tool", "get_memories: success");
+            return { memories: data.memories || "No memories saved yet." };
+          },
+        }),
+
+        tool({
+          name: "save_memories",
+          description:
+            "Save or update the user's memories. This is a freeform markdown document that persists across sessions. Use this when the user says 'remember that...', 'make a note that...', or asks you to save something for later. Always read existing memories first with get_memories, then append or update rather than overwriting.",
+          parameters: {
+            type: "object",
+            properties: {
+              content: {
+                type: "string",
+                description: "The full updated markdown content to save. Include all existing memories plus any additions.",
+              },
+            },
+            required: ["content"],
+            additionalProperties: false,
+          },
+          execute: async (args: any) => {
+            debugLogClient("tool", "save_memories: executing", args);
+            const data = await gmailApi({
+              action: "saveMemories",
+              content: args.content,
+            });
+            if (data.error) { debugLogClient("error", "save_memories: failed", data.error); return { error: data.error }; }
+            debugLogClient("tool", "save_memories: success");
+            return { success: true, message: "Memories saved." };
+          },
+        }),
+      ] : []),
 
       tool({
         name: "get_session_summary",
