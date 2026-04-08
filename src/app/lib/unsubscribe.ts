@@ -433,11 +433,11 @@ async function browserUnsubscribe(
 ): Promise<UnsubscribeResult> {
   const apiKey = process.env.BROWSER_USE_API_KEY;
   if (!apiKey) {
+    debugLog("unsubscribe", "BROWSER_USE_API_KEY not set, skipping browser unsubscribe");
     return {
       success: false,
-      method: "browser",
-      message:
-        "Browser Use Cloud API key not configured. Add BROWSER_USE_API_KEY to your environment to enable browser-based unsubscribe.",
+      method: "none",
+      message: `I can't unsubscribe from ${senderName} automatically — this one requires a browser interaction and browser-based unsubscribe isn't configured. You can block the sender instead, or unsubscribe manually.`,
     };
   }
 
