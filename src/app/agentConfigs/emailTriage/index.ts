@@ -120,9 +120,11 @@ ${deps.dbAvailable ? `# Profile
 # Filters
 - If the user asks what Gmail filters are active, call list_gmail_filters and summarize the relevant ones.
 - If the user wants to auto-archive emails like the current one, first call preview_archive_filter_for_email for the current message. Explain the recommended match strategy before making changes.
+- Gmail subject filters use **partial matching** (substring search). A filter with subject "Your Receipt" will match emails with subject "Your Receipt from Carphone Warehouse", "Monthly Your Receipt", etc. When explaining the from_and_subject strategy, make this clear — the user does not need the exact full subject line.
 - Prefer the narrower "from_and_subject" strategy unless the user clearly wants every message from that sender archived.
 - If preview_archive_filter_for_email shows a very close existing filter, offer to replace that filter instead of adding a duplicate. Be explicit that Gmail doesn't support editing filters directly, so replacing means delete-and-recreate.
 - Before calling apply_archive_filter_for_email, confirm whether they want a new filter or to replace an existing one.
+- After creating a filter, the response includes matchingInboxCount — the number of existing inbox emails that match. If matchingInboxCount > 0, tell the user and ask if they'd like to apply the filter retroactively. If they confirm, call apply_filter_to_existing_emails.
 - If a filter tool says Gmail needs to be reconnected, tell the user to reconnect Gmail and do not keep retrying.
 
 # Prioritization
@@ -883,7 +885,7 @@ You decide the order — use your judgment. The user trusts you to surface the i
               type: "string",
               enum: ["from", "from_and_subject"],
               description:
-                "How narrowly to match the current email. Use from_and_subject unless the user wants all email from that sender archived.",
+                "How narrowly to match. from_and_subject uses partial subject matching (e.g. 'Your Receipt' matches 'Your Receipt from Carphone Warehouse'). Use from_and_subject unless the user wants all email from that sender archived.",
             },
             existing_filter_id: {
               type: "string",
@@ -903,6 +905,40 @@ You decide the order — use your judgment. The user trusts you to surface the i
                 ? "fromAndSubject"
                 : "from",
             existingFilterId: args.existing_filter_id,
+          });
+          if (data.error) return data;
+          return data;
+        },
+      }),
+
+      tool({
+        name: "apply_filter_to_existing_emails",
+        description:
+          "Apply an archive filter retroactively to matching emails already in the inbox. Only call this after creating a filter and the user confirming they want it applied to existing emails.",
+        parameters: {
+          type: "object",
+          properties: {
+            message_id: {
+              type: "string",
+              description: "The ID of the email used to create the filter",
+            },
+            match_strategy: {
+              type: "string",
+              enum: ["from", "from_and_subject"],
+              description: "The same match strategy used when creating the filter.",
+            },
+          },
+          required: ["message_id", "match_strategy"],
+          additionalProperties: false,
+        },
+        execute: async (args: any) => {
+          const data = await gmailApi({
+            action: "applyFilterToExisting",
+            messageId: args.message_id,
+            matchStrategy:
+              args.match_strategy === "from_and_subject"
+                ? "fromAndSubject"
+                : "from",
           });
           if (data.error) return data;
           return data;

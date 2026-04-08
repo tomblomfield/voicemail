@@ -17,6 +17,7 @@ import {
   previewArchiveFilterForEmail,
   upsertArchiveFilterForEmail,
   blockSender,
+  applyFilterToExistingEmails,
 } from "@/app/lib/gmail";
 import { getUnsubscribeInfo, performUnsubscribe } from "@/app/lib/unsubscribe";
 import {
@@ -88,6 +89,13 @@ async function handleAction(action: string, params: any, tokens: any): Promise<a
         params.messageId,
         params.matchStrategy,
         params.existingFilterId
+      );
+    }
+    case "applyFilterToExisting": {
+      return await applyFilterToExistingEmails(
+        tokens,
+        params.messageId,
+        params.matchStrategy
       );
     }
     case "blockSender": {

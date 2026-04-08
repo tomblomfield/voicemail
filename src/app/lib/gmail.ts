@@ -221,7 +221,7 @@ function summarizeFilterCriteria(criteria: GmailFilterCriteria) {
 
   if (criteria.from) parts.push(`from ${criteria.from}`);
   if (criteria.to) parts.push(`to ${criteria.to}`);
-  if (criteria.subject) parts.push(`subject "${criteria.subject}"`);
+  if (criteria.subject) parts.push(`subject contains "${criteria.subject}"`);
   if (criteria.query) parts.push(`query "${criteria.query}"`);
   if (criteria.negatedQuery) parts.push(`excluding "${criteria.negatedQuery}"`);
   if (criteria.hasAttachment) parts.push("has attachments");
@@ -309,6 +309,80 @@ function getFilterMatchDetails(
       reasons.includes("matches this sender") &&
       (reasons.includes("matches this subject") || filter.archives),
   };
+}
+
+export function buildSearchQueryFromCriteria(criteria: GmailFilterCriteria): string {
+  const parts: string[] = [];
+  if (criteria.from) parts.push(`from:(${criteria.from})`);
+  if (criteria.to) parts.push(`to:(${criteria.to})`);
+  if (criteria.subject) parts.push(`subject:(${criteria.subject})`);
+  if (criteria.query) parts.push(criteria.query);
+  return parts.join(" ");
+}
+
+async function countMatchingInboxEmails(
+  tokens: any,
+  criteria: GmailFilterCriteria
+): Promise<number> {
+  const gmail = getGmailClient(tokens);
+  const query = buildSearchQueryFromCriteria(criteria) + " in:inbox";
+  const res = await gmail.users.messages.list({
+    userId: "me",
+    q: query,
+    maxResults: 1,
+  });
+  return res.data.resultSizeEstimate || 0;
+}
+
+export async function applyFilterToExistingEmails(
+  tokens: any,
+  messageId: string,
+  matchStrategy: FilterMatchStrategy
+): Promise<{ archivedCount: number }> {
+  const gmail = getGmailClient(tokens);
+  const message = await getEmailMetadata(tokens, messageId);
+  const actualMatchStrategy =
+    matchStrategy === "fromAndSubject" && !message.subject
+      ? "from"
+      : matchStrategy;
+  const criteria = buildArchiveFilterCriteria(
+    message.fromEmail,
+    message.subject,
+    actualMatchStrategy
+  );
+  const query = buildSearchQueryFromCriteria(criteria) + " in:inbox";
+
+  const messageIds: string[] = [];
+  let pageToken: string | undefined;
+
+  do {
+    const res: any = await gmail.users.messages.list({
+      userId: "me",
+      q: query,
+      maxResults: 500,
+      pageToken,
+    });
+
+    if (res.data.messages) {
+      messageIds.push(...res.data.messages.map((m: any) => m.id!));
+    }
+    pageToken = res.data.nextPageToken || undefined;
+  } while (pageToken);
+
+  if (messageIds.length === 0) return { archivedCount: 0 };
+
+  for (let i = 0; i < messageIds.length; i += 1000) {
+    const batch = messageIds.slice(i, i + 1000);
+    await gmail.users.messages.batchModify({
+      userId: "me",
+      requestBody: {
+        ids: batch,
+        removeLabelIds: ["INBOX"],
+      },
+    });
+  }
+
+  return { archivedCount: messageIds.length };
 }
 
 function mergeArchiveAction(action?: GmailFilterAction): GmailFilterAction {
@@ -703,6 +777,7 @@ export async function upsertArchiveFilterForEmail(
   matchStrategy: FilterMatchStrategy;
   filter: GmailFilterSummary;
   replacedFilter?: GmailFilterSummary;
+  matchingInboxCount: number;
 }> {
   requireScopes(tokens, [GMAIL_FILTER_WRITE_SCOPE]);
 
@@ -727,10 +802,13 @@ export async function upsertArchiveFilterForEmail(
       },
     });
 
+    const matchingInboxCount = await countMatchingInboxEmails(tokens, criteria);
+
     return {
       operation: "created",
       matchStrategy: actualMatchStrategy,
       filter: summarizeExistingFilter(created.data),
+      matchingInboxCount,
     };
   }
 
@@ -754,11 +832,14 @@ export async function upsertArchiveFilterForEmail(
       },
     });
 
+    const matchingInboxCount = await countMatchingInboxEmails(tokens, criteria);
+
     return {
       operation: "replaced",
       matchStrategy: actualMatchStrategy,
       filter: summarizeExistingFilter(created.data),
       replacedFilter: existingFilter,
+      matchingInboxCount,
     };
   } catch (error) {
     try {

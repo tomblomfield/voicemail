@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   appendVoicemailFooter,
   buildArchiveFilterCriteria,
+  buildSearchQueryFromCriteria,
   describeFilter,
   getMissingScopes,
   GMAIL_FILTER_WRITE_SCOPE,
@@ -157,8 +158,21 @@ describe("filter helpers", () => {
         { removeLabelIds: ["INBOX"] }
       )
     ).toBe(
-      'If from alice@example.com, subject "Quarterly plan", then archive.'
+      'If from alice@example.com, subject contains "Quarterly plan", then archive.'
     );
+  });
+
+  it("builds a Gmail search query from filter criteria", () => {
+    expect(
+      buildSearchQueryFromCriteria({
+        from: "alice@example.com",
+        subject: "Quarterly plan",
+      })
+    ).toBe('from:(alice@example.com) subject:(Quarterly plan)');
+
+    expect(
+      buildSearchQueryFromCriteria({ from: "alice@example.com" })
+    ).toBe('from:(alice@example.com)');
   });
 
   it("detects when filter-management scope is missing", () => {
