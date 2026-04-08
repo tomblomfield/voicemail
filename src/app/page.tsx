@@ -286,20 +286,17 @@ export default function HomePage() {
               <h3 className="font-semibold text-lg mb-2">{item.title}</h3>
               <p className="text-gray-400 text-sm leading-relaxed">
                 {item.description}
-                {"link" in item && item.link && (
-                  <>
-                    {" "}
-                    <a
-                      href={item.link}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-emerald-400 hover:text-emerald-300 underline underline-offset-4 transition-colors"
-                    >
-                      View on GitHub
-                    </a>
-                  </>
-                )}
               </p>
+              {"link" in item && item.link && (
+                <a
+                  href={item.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-emerald-400 hover:text-emerald-300 underline underline-offset-4 transition-colors text-sm mt-1 inline-block"
+                >
+                  View on GitHub
+                </a>
+              )}
             </div>
           ))}
         </div>
