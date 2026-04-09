@@ -58,6 +58,43 @@ function App() {
 
   const [isMuted, setIsMuted] = useState(false);
 
+  // PWA install prompt
+  const [showInstallBanner, setShowInstallBanner] = useState(false);
+  const deferredPromptRef = useRef<Event | null>(null);
+
+  useEffect(() => {
+    // Check if already installed as PWA
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches
+      || (navigator as unknown as { standalone?: boolean }).standalone === true;
+    if (isStandalone) return;
+
+    // Check if dismissed recently
+    const dismissed = localStorage.getItem('install-banner-dismissed');
+    if (dismissed && Date.now() - parseInt(dismissed) < 7 * 24 * 60 * 60 * 1000) return;
+
+    // Android / Chrome: listen for beforeinstallprompt
+    const handler = (e: Event) => {
+      e.preventDefault();
+      deferredPromptRef.current = e;
+      setShowInstallBanner(true);
+    };
+    window.addEventListener('beforeinstallprompt', handler);
+
+    // iOS Safari: detect and show manual instructions
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as unknown as { MSStream?: unknown }).MSStream;
+    const isSafari = /Safari/.test(navigator.userAgent) && !/CriOS|FxiOS/.test(navigator.userAgent);
+    if (isIOS && isSafari) {
+      setShowInstallBanner(true);
+    }
+
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  const dismissInstallBanner = () => {
+    setShowInstallBanner(false);
+    localStorage.setItem('install-banner-dismissed', Date.now().toString());
+  };
+
   const { connect, disconnect, sendEvent, mute } =
     useRealtimeSession({
       onConnectionChange: (s) => {
@@ -331,7 +368,7 @@ function App() {
 
   if (authState === null) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gray-950 text-white">
+      <div className="flex items-center justify-center h-dvh-safe bg-gray-950 text-white">
         <div className="text-xl">Loading...</div>
       </div>
     );
@@ -342,14 +379,27 @@ function App() {
       window.location.href = "/api/auth/logout";
     }
     return (
-      <div className="flex items-center justify-center h-screen bg-gray-950 text-white">
+      <div className="flex items-center justify-center h-dvh-safe bg-gray-950 text-white">
         <div className="text-xl">Redirecting...</div>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col items-center justify-between h-screen bg-gray-950 text-white px-6 py-10 select-none">
+    <div className="flex flex-col items-center justify-between h-dvh-safe bg-gray-950 text-white px-6 py-6 select-none">
+      {showInstallBanner && (
+        <div className="fixed top-0 left-0 right-0 z-50 bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-center justify-between" style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}>
+          <div className="flex-1 text-sm text-gray-200">
+            <span className="font-medium">Add to Home Screen</span>
+            <span className="text-gray-400 ml-1">— Tap</span>
+            <svg className="inline w-4 h-4 mx-1 -mt-0.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+            <span className="text-gray-400">then &ldquo;Add to Home Screen&rdquo;</span>
+          </div>
+          <button onClick={dismissInstallBanner} className="ml-3 text-gray-500 hover:text-gray-300 text-lg leading-none">&times;</button>
+        </div>
+      )}
       <div className="text-center">
         <h1 className="text-2xl font-bold tracking-tight">Voicemail</h1>
         <p className="text-gray-500 text-sm mt-1">Hands-free email + calendar</p>
@@ -398,7 +448,7 @@ function App() {
         )}
       </div>
 
-      <div className="relative mb-8 flex items-center justify-center">
+      <div className="relative mb-2 flex items-center justify-center">
         <button
           onClick={onToggleConnection}
           disabled={isConnecting}

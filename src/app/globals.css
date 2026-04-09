@@ -14,4 +14,14 @@ body {
     "Helvetica Neue", Arial, "Noto Sans", sans-serif;
   -webkit-user-select: none;
   user-select: none;
+  /* Prevent overscroll bounce on iOS */
+  overscroll-behavior: none;
+}
+
+/* Safe-area-aware full height */
+.h-dvh-safe {
+  height: 100vh;
+  height: 100dvh;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
 }

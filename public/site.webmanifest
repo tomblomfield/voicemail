@@ -1,6 +1,8 @@
 {
   "name": "Voicemail AI",
   "short_name": "Voicemail",
+  "start_url": "/",
+  "scope": "/",
   "icons": [
     {
       "src": "/icon-192.png",
@@ -13,7 +15,8 @@
       "type": "image/png"
     }
   ],
-  "theme_color": "#000000",
-  "background_color": "#000000",
-  "display": "standalone"
+  "theme_color": "#030712",
+  "background_color": "#030712",
+  "display": "standalone",
+  "orientation": "portrait"
 }
