@@ -2,20 +2,28 @@ import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { decryptTokens, hasRequiredGoogleScopes } from "@/app/lib/gmail";
 import { debugLog } from "@/app/lib/debugLog";
+import { SESSION_COOKIE_NAME, getSessionUserId } from "@/app/lib/session";
+import { getGoogleAccounts } from "@/app/lib/db";
+
+async function isAuthenticated(req: NextRequest): Promise<boolean> {
+  const sessionCookie = req.cookies.get(SESSION_COOKIE_NAME);
+  if (!sessionCookie) return false;
+  const userId = getSessionUserId(sessionCookie.value);
+  if (!userId) return false;
+
+  const accounts = await getGoogleAccounts(userId);
+  for (const a of accounts) {
+    try {
+      const tokens = decryptTokens(a.encrypted_tokens);
+      if (hasRequiredGoogleScopes(tokens)) return true;
+    } catch {}
+  }
+  return false;
+}
 
 // Proxy endpoint for the OpenAI Responses API
 export async function POST(req: NextRequest) {
-  const cookie = req.cookies.get("gmail_tokens");
-  if (!cookie) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  try {
-    const tokens = decryptTokens(cookie.value);
-    if (!hasRequiredGoogleScopes(tokens)) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-  } catch {
+  if (!(await isAuthenticated(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -75,4 +83,3 @@ async function textResponse(openai: OpenAI, body: any) {
     return NextResponse.json({ error: 'failed' }, { status: 500 });
   }
 }
-  

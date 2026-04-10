@@ -165,7 +165,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
             create_response: true,
             eagerness: 'low',
           },
-        },
+        } as any,
         outputGuardrails: outputGuardrails ?? [],
         context: extraContext ?? {},
       });

@@ -10,12 +10,14 @@ import { useRealtimeSession } from "./hooks/useRealtimeSession";
 import {
   createEmailTriageAgent,
   EmailData,
+  AccountInfo,
 } from "@/app/agentConfigs/emailTriage";
 import type { InferredCalendarProfile } from "@/app/lib/calendar";
 
 type AuthState = {
   authenticated: boolean;
   filterWriteEnabled: boolean;
+  accounts: AccountInfo[];
 };
 
 function App() {
@@ -45,7 +47,8 @@ function App() {
   const emailIndexRef = useRef<number>(0);
   const actionsRef = useRef({ replied: 0, skipped: 0, archived: 0, blocked: 0, unsubscribed: 0 });
   const calendarProfileRef = useRef<InferredCalendarProfile | null>(null);
-  const nextPageTokenRef = useRef<string | undefined>(undefined);
+  const nextPageTokensRef = useRef<Record<string, string | null>>({});
+  const focusedAccountIdRef = useRef<string | null>(null);
 
   // Reconnection state
   const connectOptionsRef = useRef<{
@@ -57,22 +60,20 @@ function App() {
   const maxReconnectAttempts = 5;
 
   const [isMuted, setIsMuted] = useState(false);
+  const [showAccountPanel, setShowAccountPanel] = useState(false);
 
   // PWA install prompt
   const [showInstallBanner, setShowInstallBanner] = useState(false);
   const deferredPromptRef = useRef<Event | null>(null);
 
   useEffect(() => {
-    // Check if already installed as PWA
     const isStandalone = window.matchMedia('(display-mode: standalone)').matches
       || (navigator as unknown as { standalone?: boolean }).standalone === true;
     if (isStandalone) return;
 
-    // Check if dismissed recently
     const dismissed = localStorage.getItem('install-banner-dismissed');
     if (dismissed && Date.now() - parseInt(dismissed) < 7 * 24 * 60 * 60 * 1000) return;
 
-    // Android / Chrome: listen for beforeinstallprompt
     const handler = (e: Event) => {
       e.preventDefault();
       deferredPromptRef.current = e;
@@ -80,7 +81,6 @@ function App() {
     };
     window.addEventListener('beforeinstallprompt', handler);
 
-    // iOS Safari: detect and show manual instructions
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as unknown as { MSStream?: unknown }).MSStream;
     const isSafari = /Safari/.test(navigator.userAgent) && !/CriOS|FxiOS/.test(navigator.userAgent);
     if (isIOS && isSafari) {
@@ -121,14 +121,20 @@ function App() {
         setAuthState({
           authenticated: !!data.authenticated,
           filterWriteEnabled: !!data.filterWriteEnabled,
+          accounts: (data.accounts || []).map((a: any) => ({
+            id: a.id,
+            email: a.email,
+            displayName: a.displayName,
+            isPrimary: a.isPrimary,
+          })),
         })
       )
       .catch(() =>
-        setAuthState({ authenticated: false, filterWriteEnabled: false })
+        setAuthState({ authenticated: false, filterWriteEnabled: false, accounts: [] })
       );
   }, []);
 
-  const fetchSessionData = async (): Promise<{ key: string; dbAvailable: boolean } | null> => {
+  const fetchSessionData = async (): Promise<{ key: string; dbAvailable: boolean; accountCount: number } | null> => {
     logClientEvent({ url: "/session" }, "fetch_session_token_request");
     const tokenResponse = await fetch("/api/session");
     const data = await tokenResponse.json();
@@ -141,7 +147,11 @@ function App() {
       return null;
     }
 
-    return { key: data.client_secret.value, dbAvailable: !!data.dbAvailable };
+    return {
+      key: data.client_secret.value,
+      dbAvailable: !!data.dbAvailable,
+      accountCount: data.accountCount || 1,
+    };
   };
 
   const handleSessionDrop = useCallback(async () => {
@@ -251,12 +261,12 @@ function App() {
       emailIndexRef.current = 0;
       actionsRef.current = { replied: 0, skipped: 0, archived: 0, blocked: 0, unsubscribed: 0 };
       calendarProfileRef.current = null;
-      nextPageTokenRef.current = undefined;
+      nextPageTokensRef.current = {};
+      focusedAccountIdRef.current = null;
 
       const session = await fetchSessionData();
       if (!session) return;
 
-      // Create agent with deps — emails will be populated by get_email_count tool
       const actionKeyMap = { reply: "replied", skip: "skipped", archive: "archived", block: "blocked", unsubscribe: "unsubscribed" } as const;
       const agent = createEmailTriageAgent({
         emails: () => emailsRef.current,
@@ -276,8 +286,10 @@ function App() {
         setCalendarProfile: (profile) => {
           calendarProfileRef.current = profile;
         },
-        nextPageToken: () => nextPageTokenRef.current,
-        setNextPageToken: (token) => { nextPageTokenRef.current = token; },
+        nextPageTokens: () => nextPageTokensRef.current,
+        setNextPageTokens: (tokens) => { nextPageTokensRef.current = tokens; },
+        focusedAccountId: () => focusedAccountIdRef.current,
+        setFocusedAccountId: (id) => { focusedAccountIdRef.current = id; },
         dbAvailable: session.dbAvailable,
         onMute: () => {
           setIsMuted(true);
@@ -290,6 +302,7 @@ function App() {
           disconnectFromRealtime();
           window.location.href = "/api/auth/logout";
         },
+        accounts: authState?.accounts || [],
       });
 
       connectOptionsRef.current = { agent };
@@ -372,6 +385,36 @@ function App() {
     }
   };
 
+  const removeAccount = async (accountId: string) => {
+    try {
+      const res = await fetch("/api/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "remove", accountId }),
+      });
+      const data = await res.json();
+      if (data.remainingCount === 0) {
+        window.location.href = "/api/auth/logout";
+        return;
+      }
+      // Refresh auth state
+      const statusRes = await fetch("/api/auth/status");
+      const statusData = await statusRes.json();
+      setAuthState({
+        authenticated: !!statusData.authenticated,
+        filterWriteEnabled: !!statusData.filterWriteEnabled,
+        accounts: (statusData.accounts || []).map((a: any) => ({
+          id: a.id,
+          email: a.email,
+          displayName: a.displayName,
+          isPrimary: a.isPrimary,
+        })),
+      });
+    } catch (err) {
+      console.error("Failed to remove account:", err);
+    }
+  };
+
   const messages = transcriptItems
     .filter((item) => item.type === "MESSAGE" && !item.isHidden)
     .sort((a, b) => a.createdAtMs - b.createdAtMs);
@@ -381,6 +424,7 @@ function App() {
   const isConnecting = sessionStatus === "CONNECTING";
   const isAuthenticated = authState?.authenticated ?? false;
   const filterWriteEnabled = authState?.filterWriteEnabled ?? false;
+  const accounts = authState?.accounts || [];
 
   // Auto-start conversation when authenticated
   const hasAutoStarted = useRef(false);
@@ -425,15 +469,21 @@ function App() {
           <button onClick={dismissInstallBanner} className="ml-3 text-gray-500 hover:text-gray-300 text-lg leading-none">&times;</button>
         </div>
       )}
+
       <div className="text-center">
         <h1 className="text-2xl font-bold tracking-tight">Voicemail</h1>
-        <p className="text-gray-500 text-sm mt-1">Hands-free email + calendar</p>
-        <a
-          href="/api/auth/logout"
+        <p className="text-gray-500 text-sm mt-1">Hands-free email & calendar</p>
+
+        {/* Account management toggle */}
+        <button
+          onClick={() => setShowAccountPanel(!showAccountPanel)}
           className="inline-block mt-2 text-xs text-gray-600 hover:text-gray-400 transition-colors"
         >
-          Log out
-        </a>
+          {accounts.length > 0
+            ? `${accounts.length} account${accounts.length > 1 ? "s" : ""} connected · Add +`
+            : "Log out"}
+        </button>
+
         {!filterWriteEnabled && (
           <a
             href="/api/auth"
@@ -443,6 +493,68 @@ function App() {
           </a>
         )}
       </div>
+
+      {/* Account management panel */}
+      {showAccountPanel && (
+        <div className="w-full max-w-sm mt-4 p-4 rounded-2xl border border-gray-800/60 bg-gray-900/60">
+          <div className="text-sm font-medium text-gray-400 mb-3">
+            Connected accounts
+          </div>
+          <div className="space-y-2">
+            {accounts.map((account) => (
+              <div
+                key={account.id}
+                className="flex items-center justify-between py-1.5"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-gray-200 truncate">
+                    {account.displayName ? (
+                      <>
+                        {account.displayName}
+                        <span className="text-gray-500 text-xs ml-1.5">
+                          ({account.email})
+                        </span>
+                      </>
+                    ) : (
+                      account.email
+                    )}
+                  </div>
+                  {account.isPrimary && (
+                    <span className="text-[10px] text-indigo-400 font-medium uppercase tracking-wider">
+                      Primary
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={() => removeAccount(account.id)}
+                  className="ml-3 text-xs text-gray-600 hover:text-red-400 transition-colors shrink-0"
+                >
+                  Disconnect
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-3 pt-3 border-t border-gray-800/60 flex flex-col gap-2">
+            {accounts.length < 5 && (
+              <a
+                href="/api/auth?addAccount=true"
+                className="text-sm text-indigo-400 hover:text-indigo-300 transition-colors"
+              >
+                + Add another account
+              </a>
+            )}
+            <div className="flex items-center gap-4">
+              <a
+                href="/api/auth/logout"
+                className="text-xs text-gray-600 hover:text-red-400 transition-colors"
+              >
+                {accounts.length > 1 ? "Disconnect all & log out" : "Log out"}
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 flex flex-col items-center justify-center w-full max-w-lg gap-4">
         {isConnected && latestMessage && (

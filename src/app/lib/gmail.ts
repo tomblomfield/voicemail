@@ -91,11 +91,15 @@ function getEncryptionKey(): string {
   return key;
 }
 
-export function getAuthUrl(redirectUri?: string): string {
+export function getAuthUrl(
+  redirectUri?: string,
+  options?: { state?: string }
+): string {
   return getOAuth2Client(redirectUri).generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
     scope: [...REQUIRED_GOOGLE_SCOPES],
+    ...(options?.state ? { state: options.state } : {}),
   });
 }
 

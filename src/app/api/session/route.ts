@@ -1,39 +1,60 @@
 import { NextRequest, NextResponse } from "next/server";
-import { decryptTokens, hasRequiredGoogleScopes } from "@/app/lib/gmail";
-import { google } from "googleapis";
+import {
+  decryptTokens,
+  hasRequiredGoogleScopes,
+} from "@/app/lib/gmail";
 import { debugLog } from "@/app/lib/debugLog";
-import { initDb, upsertUser, isDbAvailable } from "@/app/lib/db";
+import {
+  initDb,
+  upsertUser,
+  isDbAvailable,
+  getGoogleAccounts,
+} from "@/app/lib/db";
+import {
+  SESSION_COOKIE_NAME,
+  getSessionUserId,
+} from "@/app/lib/session";
 
 export async function GET(request: NextRequest) {
-  const cookie = request.cookies.get("gmail_tokens");
-  if (!cookie) {
+  const sessionCookie = request.cookies.get(SESSION_COOKIE_NAME);
+  if (!sessionCookie) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const userId = getSessionUserId(sessionCookie.value);
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const accounts = await getGoogleAccounts(userId);
+  let userEmail: string | null = null;
+  let accountCount = 0;
+
+  for (const a of accounts) {
+    try {
+      const tokens = decryptTokens(a.encrypted_tokens);
+      if (hasRequiredGoogleScopes(tokens)) {
+        if (!userEmail) userEmail = a.email;
+        accountCount++;
+      }
+    } catch {
+      // skip bad tokens
+    }
+  }
+
+  if (accountCount === 0) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   try {
-    const tokens = decryptTokens(cookie.value);
-    if (!hasRequiredGoogleScopes(tokens)) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    console.log(
+      `session_started: ${userEmail} accounts=${accountCount}`
+    );
+    if (userEmail && isDbAvailable()) {
+      await initDb();
+      await upsertUser(userEmail);
     }
 
-    // Log session start with user email
-    try {
-      const oauth2Client = new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET
-      );
-      oauth2Client.setCredentials(tokens);
-      const gmail = google.gmail({ version: "v1", auth: oauth2Client });
-      const profile = await gmail.users.getProfile({ userId: "me" });
-      const email = profile.data.emailAddress;
-      console.log(`session_started: ${email}`);
-      if (email && isDbAvailable()) {
-        await initDb();
-        await upsertUser(email);
-      }
-    } catch {
-      console.log("session_started: unknown_user");
-    }
     debugLog("api", "Creating OpenAI realtime session...");
     const response = await fetch(
       "https://api.openai.com/v1/realtime/sessions",
@@ -49,8 +70,16 @@ export async function GET(request: NextRequest) {
       }
     );
     const data = await response.json();
-    debugLog("api", "OpenAI realtime session created", { id: data.id, model: data.model, expires_at: data.expires_at });
-    return NextResponse.json({ ...data, dbAvailable: isDbAvailable() });
+    debugLog("api", "OpenAI realtime session created", {
+      id: data.id,
+      model: data.model,
+      expires_at: data.expires_at,
+    });
+    return NextResponse.json({
+      ...data,
+      dbAvailable: isDbAvailable(),
+      accountCount,
+    });
   } catch (error) {
     console.error("Error in /session:", error);
     return NextResponse.json(

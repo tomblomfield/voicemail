@@ -15,6 +15,13 @@ async function gmailApi(body: Record<string, any>) {
   return data;
 }
 
+export interface AccountInfo {
+  id: string;
+  email: string;
+  displayName: string | null;
+  isPrimary: boolean;
+}
+
 export interface EmailData {
   id: string;
   threadId: string;
@@ -25,6 +32,9 @@ export interface EmailData {
   snippet: string;
   date: string;
   body?: string;
+  accountId?: string;
+  accountName?: string;
+  accountEmail?: string;
 }
 
 export interface EmailTriageDeps {
@@ -37,15 +47,44 @@ export interface EmailTriageDeps {
   getActionSummary: () => { replied: number; skipped: number; archived: number; blocked: number; unsubscribed: number };
   calendarProfile: () => InferredCalendarProfile | null;
   setCalendarProfile: (profile: InferredCalendarProfile) => void;
-  nextPageToken: () => string | undefined;
-  setNextPageToken: (token: string | undefined) => void;
+  nextPageTokens: () => Record<string, string | null>;
+  setNextPageTokens: (tokens: Record<string, string | null>) => void;
   dbAvailable: boolean;
   onMute: () => void;
   onStop: () => void;
   onLogout: () => void;
+  accounts: AccountInfo[];
+  focusedAccountId: () => string | null;
+  setFocusedAccountId: (id: string | null) => void;
+}
+
+function buildMultiAccountInstructions(accounts: AccountInfo[]): string {
+  if (accounts.length <= 1) return "";
+
+  const accountList = accounts
+    .map((a) => `- "${a.displayName || a.email}" (${a.email})`)
+    .join("\n");
+
+  const unnamed = accounts.filter((a) => !a.displayName);
+  const namingPrompt =
+    unnamed.length > 0
+      ? `\n\nIMPORTANT: ${unnamed.length === accounts.length ? "None of your" : "Some of your"} connected accounts have names yet. Before starting email triage, ask the user what they'd like to call each unnamed account (e.g., "Work", "Personal"). Use rename_account to save the name. Once named, use the name to refer to that account going forward.`
+      : "";
+
+  return `
+# Multiple Accounts
+You have access to ${accounts.length} Gmail accounts:
+${accountList}
+
+When triaging emails from multiple accounts, briefly mention which account when switching between accounts (e.g., "This next email is to your ${accounts[0].displayName || "first"} account."). Don't mention the account if consecutive emails are from the same account. When composing a new email, ask which account to send from unless the context makes it obvious.
+
+If the user wants to focus on just one account (e.g., "just my work emails", "focus on personal"), call focus_account to filter the inbox to that account only. This re-fetches emails from just that account. When they want all accounts again, call focus_all_accounts.${namingPrompt}
+`;
 }
 
 export function createEmailTriageAgent(deps: EmailTriageDeps) {
+  const isMultiAccount = deps.accounts.length > 1;
+
   async function getOrLoadCalendarProfile() {
     const cached = deps.calendarProfile();
     if (cached) return { profile: cached, cached: true };
@@ -67,6 +106,13 @@ export function createEmailTriageAgent(deps: EmailTriageDeps) {
       zoomLink: profile.zoomLink?.value || null,
       zoomConfidence: profile.zoomLink?.confidence || null,
     };
+  }
+
+  // Helper: look up accountId for a given email message
+  function getAccountIdForEmail(messageId: string): string | undefined {
+    const emails = deps.emails();
+    const email = emails.find((e) => e.id === messageId);
+    return email?.accountId;
   }
 
   return new RealtimeAgent({
@@ -153,7 +199,7 @@ You decide the order — use your judgment. The user trusts you to surface the i
 - Be natural and conversational, like a helpful assistant riding along.
 - If the user says something ambiguous, default to the most likely intent (e.g., "next" means skip).
 - Don't repeat options every time — just ask "What would you like to do?" after the first couple.
-`,
+${buildMultiAccountInstructions(deps.accounts)}`,
 
     tools: [
       tool({
@@ -182,7 +228,10 @@ You decide the order — use your judgment. The user trusts you to surface the i
       tool({
         name: "get_email_count",
         description:
-          "Get all unread emails from the inbox. Returns the full list with sender, subject, to/cc, and snippet for each email. Call this first so you can tell the user how many emails they have and which ones look urgent.",
+          "Get all unread emails from the inbox. Returns the full list with sender, subject, to/cc, and snippet for each email. Call this first so you can tell the user how many emails they have and which ones look urgent." +
+          (isMultiAccount
+            ? " Fetches from ALL connected accounts. Each email includes accountId and accountName."
+            : ""),
         parameters: {
           type: "object",
           properties: {},
@@ -191,7 +240,8 @@ You decide the order — use your judgment. The user trusts you to surface the i
         },
         execute: async () => {
           debugLogClient("tool", "get_email_count: executing");
-          const data = await gmailApi({ action: "list", maxResults: 50 });
+          const focused = deps.focusedAccountId();
+          const data = await gmailApi({ action: "list", maxResults: 50, ...(focused ? { accountId: focused } : {}) });
           if (data.error) {
             debugLogClient("error", "get_email_count: failed", data.error);
             return { error: data.error };
@@ -199,10 +249,20 @@ You decide the order — use your judgment. The user trusts you to surface the i
           const emails = data.emails || [];
           deps.setEmails(emails);
           deps.setEmailIndex(0);
-          deps.setNextPageToken(data.nextPageToken || undefined);
-          const result = {
+          deps.setNextPageTokens(data.accountPageTokens || {});
+
+          // Build per-account counts for multi-account
+          const accountCounts: Record<string, number> = {};
+          for (const e of emails) {
+            const key = e.accountName || e.accountId || "default";
+            accountCounts[key] = (accountCounts[key] || 0) + 1;
+          }
+
+          const result: any = {
             count: emails.length,
-            has_more_emails: !!data.nextPageToken,
+            has_more_emails: Object.values(data.accountPageTokens || {}).some(
+              (t: any) => t !== null
+            ),
             emails: emails.map((e: any) => ({
               id: e.id,
               from: e.from,
@@ -211,9 +271,20 @@ You decide the order — use your judgment. The user trusts you to surface the i
               subject: e.subject,
               snippet: e.snippet,
               date: e.date,
+              ...(isMultiAccount
+                ? {
+                    accountId: e.accountId,
+                    accountName: e.accountName,
+                  }
+                : {}),
             })),
           };
-          debugLogClient("tool", `get_email_count: ${emails.length} emails, hasMore=${!!data.nextPageToken}`, result);
+
+          if (isMultiAccount) {
+            result.account_counts = accountCounts;
+          }
+
+          debugLogClient("tool", `get_email_count: ${emails.length} emails`, result);
           return result;
         },
       }),
@@ -230,7 +301,8 @@ You decide the order — use your judgment. The user trusts you to surface the i
         },
         execute: async () => {
           debugLogClient("tool", "reload_emails: executing");
-          const data = await gmailApi({ action: "list", maxResults: 50 });
+          const focused = deps.focusedAccountId();
+          const data = await gmailApi({ action: "list", maxResults: 50, ...(focused ? { accountId: focused } : {}) });
           if (data.error) {
             debugLogClient("error", "reload_emails: failed", data.error);
             return { error: data.error };
@@ -238,10 +310,13 @@ You decide the order — use your judgment. The user trusts you to surface the i
           const emails = data.emails || [];
           deps.setEmails(emails);
           deps.setEmailIndex(0);
-          deps.setNextPageToken(data.nextPageToken || undefined);
+          deps.setNextPageTokens(data.accountPageTokens || {});
+
           const result = {
             count: emails.length,
-            has_more_emails: !!data.nextPageToken,
+            has_more_emails: Object.values(data.accountPageTokens || {}).some(
+              (t: any) => t !== null
+            ),
             emails: emails.map((e: any) => ({
               id: e.id,
               from: e.from,
@@ -250,9 +325,12 @@ You decide the order — use your judgment. The user trusts you to surface the i
               subject: e.subject,
               snippet: e.snippet,
               date: e.date,
+              ...(isMultiAccount
+                ? { accountId: e.accountId, accountName: e.accountName }
+                : {}),
             })),
           };
-          debugLogClient("tool", `reload_emails: ${emails.length} emails, hasMore=${!!data.nextPageToken}`, result);
+          debugLogClient("tool", `reload_emails: ${emails.length} emails`, result);
           return result;
         },
       }),
@@ -269,12 +347,19 @@ You decide the order — use your judgment. The user trusts you to surface the i
         },
         execute: async () => {
           debugLogClient("tool", "fetch_more_emails: executing");
-          const pageToken = deps.nextPageToken();
-          if (!pageToken) {
+          const pageTokens = deps.nextPageTokens();
+          const hasMore = Object.values(pageTokens).some((t) => t !== null);
+          if (!hasMore) {
             debugLogClient("tool", "fetch_more_emails: no more pages");
             return { count: 0, has_more_emails: false, emails: [], message: "No more emails to load." };
           }
-          const data = await gmailApi({ action: "list", maxResults: 50, pageToken });
+          const focused = deps.focusedAccountId();
+          const data = await gmailApi({
+            action: "list",
+            maxResults: 50,
+            accountPageTokens: pageTokens,
+            ...(focused ? { accountId: focused } : {}),
+          });
           if (data.error) {
             debugLogClient("error", "fetch_more_emails: failed", data.error);
             return { error: data.error };
@@ -282,11 +367,13 @@ You decide the order — use your judgment. The user trusts you to surface the i
           const newEmails = data.emails || [];
           const existingEmails = deps.emails();
           deps.setEmails([...existingEmails, ...newEmails]);
-          deps.setNextPageToken(data.nextPageToken || undefined);
+          deps.setNextPageTokens(data.accountPageTokens || {});
           const result = {
             count: newEmails.length,
             total_loaded: existingEmails.length + newEmails.length,
-            has_more_emails: !!data.nextPageToken,
+            has_more_emails: Object.values(data.accountPageTokens || {}).some(
+              (t: any) => t !== null
+            ),
             emails: newEmails.map((e: any) => ({
               id: e.id,
               from: e.from,
@@ -295,9 +382,12 @@ You decide the order — use your judgment. The user trusts you to surface the i
               subject: e.subject,
               snippet: e.snippet,
               date: e.date,
+              ...(isMultiAccount
+                ? { accountId: e.accountId, accountName: e.accountName }
+                : {}),
             })),
           };
-          debugLogClient("tool", `fetch_more_emails: ${newEmails.length} new emails, total=${existingEmails.length + newEmails.length}, hasMore=${!!data.nextPageToken}`, result);
+          debugLogClient("tool", `fetch_more_emails: ${newEmails.length} new emails`, result);
           return result;
         },
       }),
@@ -337,7 +427,6 @@ You decide the order — use your judgment. The user trusts you to surface the i
             };
           }
 
-          // Find the requested email or take the next one
           let emailIdx: number;
           if (args.email_id) {
             emailIdx = emails.findIndex((e) => e.id === args.email_id);
@@ -364,15 +453,14 @@ You decide the order — use your judgment. The user trusts you to surface the i
           const email = emails[emailIdx];
           deps.advanceIndex();
 
-          // Fetch thread context (last 5 messages) so the agent sees the full conversation
+          // Fetch thread context
           const threadData = await gmailApi({
             action: "readThread",
             threadId: email.threadId,
+            accountId: email.accountId,
           });
 
           const threadMessages = threadData.messages || [];
-
-          // Format thread as a readable conversation for the agent
           let conversationContext = "";
           if (threadMessages.length > 1) {
             conversationContext = threadMessages
@@ -381,15 +469,15 @@ You decide the order — use your judgment. The user trusts you to surface the i
           } else if (threadMessages.length === 1) {
             conversationContext = threadMessages[0].body;
           } else {
-            // Fallback to single message body
             const bodyData = await gmailApi({
               action: "read",
               messageId: email.id,
+              accountId: email.accountId,
             });
             conversationContext = bodyData.body || email.snippet;
           }
 
-          const emailResult = {
+          const emailResult: any = {
             id: email.id,
             threadId: email.threadId,
             from: email.from,
@@ -400,6 +488,12 @@ You decide the order — use your judgment. The user trusts you to surface the i
             threadLength: threadMessages.length,
             body: conversationContext,
           };
+
+          if (isMultiAccount) {
+            emailResult.accountId = email.accountId;
+            emailResult.accountName = email.accountName;
+          }
+
           debugLogClient("tool", `get_next_email: returning email from=${email.from} subject="${email.subject}"`, { ...emailResult, body: emailResult.body.slice(0, 200) + "..." });
           return emailResult;
         },
@@ -430,16 +524,19 @@ You decide the order — use your judgment. The user trusts you to surface the i
         },
         execute: async (args: any) => {
           debugLogClient("tool", "reply_to_email: executing", args);
+          const accountId = getAccountIdForEmail(args.message_id);
           const data = await gmailApi({
             action: "reply",
             messageId: args.message_id,
             threadId: args.thread_id,
             body: args.reply_text,
+            accountId,
           });
           if (data.error) { debugLogClient("error", "reply_to_email: failed", data.error); return { error: data.error }; }
           await gmailApi({
             action: "archive",
             messageId: args.message_id,
+            accountId,
           });
           deps.recordAction("reply");
           debugLogClient("tool", "reply_to_email: success");
@@ -464,9 +561,11 @@ You decide the order — use your judgment. The user trusts you to surface the i
         },
         execute: async (args: any) => {
           debugLogClient("tool", "archive_email: executing", args);
+          const accountId = getAccountIdForEmail(args.message_id);
           const data = await gmailApi({
             action: "archive",
             messageId: args.message_id,
+            accountId,
           });
           if (data.error) { debugLogClient("error", "archive_email: failed", data.error); return { error: data.error }; }
           deps.recordAction("archive");
@@ -491,9 +590,11 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          const accountId = getAccountIdForEmail(args.message_id);
           const data = await gmailApi({
             action: "blockSender",
             messageId: args.message_id,
+            accountId,
           });
           if (data.error) return data;
           deps.recordAction("block");
@@ -523,16 +624,16 @@ You decide the order — use your judgment. The user trusts you to surface the i
         },
         execute: async (args: any) => {
           debugLogClient("tool", "unsubscribe_from_email: executing", args);
+          const accountId = getAccountIdForEmail(args.message_id);
           const data = await gmailApi({
             action: "unsubscribe",
             messageId: args.message_id,
+            accountId,
           });
           if (data.error) {
             debugLogClient("error", "unsubscribe_from_email: failed", data.error);
             return { error: data.error };
           }
-          // Record the action if we confirmed success OR launched a browser agent
-          // (browser is fire-and-forget so success=false, but we still took action)
           if (data.success || data.method === "browser") {
             deps.recordAction("unsubscribe");
           }
@@ -563,9 +664,11 @@ You decide the order — use your judgment. The user trusts you to surface the i
         },
         execute: async (args: any) => {
           debugLogClient("tool", "skip_email: executing", args);
+          const accountId = getAccountIdForEmail(args.message_id);
           const data = await gmailApi({
             action: "markRead",
             messageId: args.message_id,
+            accountId,
           });
           if (data.error) { debugLogClient("error", "skip_email: failed", data.error); return { error: data.error }; }
           deps.recordAction("skip");
@@ -577,7 +680,8 @@ You decide the order — use your judgment. The user trusts you to surface the i
       tool({
         name: "search_emails",
         description:
-          "Search the user's email history. Use Gmail search syntax (e.g. 'from:john budget', 'subject:Q3 report', 'to:me project update'). Call this when the user asks about a past email or wants to find something.",
+          "Search the user's email history. Use Gmail search syntax (e.g. 'from:john budget', 'subject:Q3 report', 'to:me project update'). Call this when the user asks about a past email or wants to find something." +
+          (isMultiAccount ? " Searches across all connected accounts." : ""),
         parameters: {
           type: "object",
           properties: {
@@ -612,6 +716,9 @@ You decide the order — use your judgment. The user trusts you to surface the i
               subject: e.subject,
               snippet: e.snippet,
               date: e.date,
+              ...(isMultiAccount
+                ? { accountId: e.accountId, accountName: e.accountName }
+                : {}),
             })),
           };
           debugLogClient("tool", `search_emails: ${result.count} results`, result);
@@ -656,7 +763,10 @@ You decide the order — use your judgment. The user trusts you to surface the i
       tool({
         name: "send_new_email",
         description:
-          "Compose and send a new email (not a reply). Only call this after confirming the recipient, subject, and body with the user. Use find_contact first if the user gives a name instead of an email address.",
+          "Compose and send a new email (not a reply). Only call this after confirming the recipient, subject, and body with the user. Use find_contact first if the user gives a name instead of an email address." +
+          (isMultiAccount
+            ? " Include account_id to specify which account to send from. If not specified, sends from the primary account."
+            : ""),
         parameters: {
           type: "object",
           properties: {
@@ -672,6 +782,15 @@ You decide the order — use your judgment. The user trusts you to surface the i
               type: "string",
               description: "Email body text",
             },
+            ...(isMultiAccount
+              ? {
+                  account_id: {
+                    type: "string",
+                    description:
+                      "The account ID to send from. Use get_connected_accounts to see available accounts.",
+                  },
+                }
+              : {}),
           },
           required: ["to", "subject", "body"],
           additionalProperties: false,
@@ -683,6 +802,7 @@ You decide the order — use your judgment. The user trusts you to surface the i
             to: args.to,
             subject: args.subject,
             body: args.body,
+            accountId: args.account_id,
           });
           if (data.error) { debugLogClient("error", "send_new_email: failed", data.error); return { error: data.error }; }
           debugLogClient("tool", "send_new_email: success");
@@ -693,7 +813,8 @@ You decide the order — use your judgment. The user trusts you to surface the i
       tool({
         name: "list_calendar_events",
         description:
-          "List Google Calendar events in a time range, or search for events by keyword. Use this when the user asks what is on their calendar today, tomorrow, this afternoon, or during any specific window. Also use this when the user asks about a specific person or meeting (e.g. 'Am I meeting with Natasha?') by passing a query.",
+          "List Google Calendar events in a time range, or search for events by keyword. Use this when the user asks what is on their calendar today, tomorrow, this afternoon, or during any specific window." +
+          (isMultiAccount ? " Merges calendars from all connected accounts." : ""),
         parameters: {
           type: "object",
           properties: {
@@ -707,11 +828,11 @@ You decide the order — use your judgment. The user trusts you to surface the i
             },
             query: {
               type: "string",
-              description: "Optional Google Calendar search query. Use this to find events by name, person, or keyword (e.g. 'Natasha', 'team standup').",
+              description: "Optional Google Calendar search query.",
             },
             max_results: {
               type: "number",
-              description: "Maximum number of events to return. Defaults to 100. Pass a higher number only if needed.",
+              description: "Maximum number of events to return. Defaults to 100.",
             },
           },
           required: [],
@@ -800,7 +921,7 @@ You decide the order — use your judgment. The user trusts you to surface the i
               type: "string",
               enum: ["home", "work", "zoom", "custom", "none"],
               description:
-                "Use an inferred runtime default or a custom location. Choose home, work, or zoom when the user refers to those saved concepts.",
+                "Use an inferred runtime default or a custom location.",
             },
             custom_location: {
               type: "string",
@@ -858,36 +979,17 @@ You decide the order — use your judgment. The user trusts you to surface the i
               type: "string",
               description: "The ID of the calendar event to edit.",
             },
-            title: {
-              type: "string",
-              description: "New event title.",
-            },
-            start_time: {
-              type: "string",
-              description: "New start time in ISO 8601 format.",
-            },
-            end_time: {
-              type: "string",
-              description: "New end time in ISO 8601 format.",
-            },
-            time_zone: {
-              type: "string",
-              description: "Optional IANA timezone like America/Los_Angeles.",
-            },
+            title: { type: "string", description: "New event title." },
+            start_time: { type: "string", description: "New start time in ISO 8601 format." },
+            end_time: { type: "string", description: "New end time in ISO 8601 format." },
+            time_zone: { type: "string", description: "Optional IANA timezone." },
             attendee_emails: {
               type: "array",
               items: { type: "string" },
-              description:
-                "Full list of attendee email addresses (replaces existing attendees).",
+              description: "Full list of attendee email addresses.",
             },
-            notes: {
-              type: "string",
-              description: "New event description or notes.",
-            },
-            location: {
-              type: "string",
-              description: "New event location.",
-            },
+            notes: { type: "string", description: "New event description." },
+            location: { type: "string", description: "New event location." },
           },
           required: ["event_id"],
           additionalProperties: false,
@@ -961,9 +1063,11 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          const accountId = getAccountIdForEmail(args.message_id);
           const data = await gmailApi({
             action: "previewArchiveFilter",
             messageId: args.message_id,
+            accountId,
           });
           if (data.error) return data;
           return data;
@@ -984,19 +1088,18 @@ You decide the order — use your judgment. The user trusts you to surface the i
             match_strategy: {
               type: "string",
               enum: ["from", "from_and_subject"],
-              description:
-                "How narrowly to match. from_and_subject uses partial subject matching (e.g. 'Your Receipt' matches 'Your Receipt from Carphone Warehouse'). Use from_and_subject unless the user wants all email from that sender archived.",
+              description: "How narrowly to match.",
             },
             existing_filter_id: {
               type: "string",
-              description:
-                "Optional existing Gmail filter ID to replace instead of creating a new filter.",
+              description: "Optional existing Gmail filter ID to replace.",
             },
           },
           required: ["message_id", "match_strategy"],
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          const accountId = getAccountIdForEmail(args.message_id);
           const data = await gmailApi({
             action: "upsertArchiveFilter",
             messageId: args.message_id,
@@ -1005,6 +1108,7 @@ You decide the order — use your judgment. The user trusts you to surface the i
                 ? "fromAndSubject"
                 : "from",
             existingFilterId: args.existing_filter_id,
+            accountId,
           });
           if (data.error) return data;
           return data;
@@ -1014,7 +1118,7 @@ You decide the order — use your judgment. The user trusts you to surface the i
       tool({
         name: "apply_filter_to_existing_emails",
         description:
-          "Apply an archive filter retroactively to matching emails already in the inbox. Only call this after creating a filter and the user confirming they want it applied to existing emails.",
+          "Apply an archive filter retroactively to matching emails already in the inbox.",
         parameters: {
           type: "object",
           properties: {
@@ -1032,6 +1136,7 @@ You decide the order — use your judgment. The user trusts you to surface the i
           additionalProperties: false,
         },
         execute: async (args: any) => {
+          const accountId = getAccountIdForEmail(args.message_id);
           const data = await gmailApi({
             action: "applyFilterToExisting",
             messageId: args.message_id,
@@ -1039,120 +1144,265 @@ You decide the order — use your judgment. The user trusts you to surface the i
               args.match_strategy === "from_and_subject"
                 ? "fromAndSubject"
                 : "from",
+            accountId,
           });
           if (data.error) return data;
           return data;
         },
       }),
 
-      ...(deps.dbAvailable ? [
-        tool({
-          name: "get_my_profile",
-          description:
-            "Retrieve the user's saved profile: home address, work address, phone number, and conference link. Use this when the user asks 'what's my home address?', 'what's my phone number?', etc.",
-          parameters: {
-            type: "object",
-            properties: {},
-            required: [],
-            additionalProperties: false,
-          },
-          execute: async () => {
-            debugLogClient("tool", "get_my_profile: executing");
-            const data = await gmailApi({ action: "getProfile" });
-            if (data.error) { debugLogClient("error", "get_my_profile: failed", data.error); return { error: data.error }; }
-            debugLogClient("tool", "get_my_profile: success", data);
-            return data;
-          },
-        }),
+      // ── Multi-account tools ──────────────────────
+      ...(isMultiAccount
+        ? [
+            tool({
+              name: "get_connected_accounts",
+              description:
+                "List the user's connected Gmail accounts with their names and email addresses. Use this to see which accounts are available.",
+              parameters: {
+                type: "object",
+                properties: {},
+                required: [],
+                additionalProperties: false,
+              },
+              execute: async () => {
+                debugLogClient("tool", "get_connected_accounts: executing");
+                const data = await gmailApi({ action: "getAccounts" });
+                if (data.error) return { error: data.error };
+                return { accounts: data.accounts };
+              },
+            }),
 
-        tool({
-          name: "update_my_profile",
-          description:
-            "Update the user's saved profile. Use this when the user says 'my home address is...', 'update my phone number to...', 'my Zoom link is...', etc. Only provide the fields that need to change.",
-          parameters: {
-            type: "object",
-            properties: {
-              home_address: {
-                type: "string",
-                description: "The user's home address.",
+            tool({
+              name: "rename_account",
+              description:
+                "Set or update the display name for a connected Gmail account (e.g., 'Work', 'Personal'). Call this when the user tells you what to call one of their accounts.",
+              parameters: {
+                type: "object",
+                properties: {
+                  account_id: {
+                    type: "string",
+                    description: "The ID of the account to rename",
+                  },
+                  display_name: {
+                    type: "string",
+                    description: "The new display name (e.g., 'Work', 'Personal')",
+                  },
+                },
+                required: ["account_id", "display_name"],
+                additionalProperties: false,
               },
-              work_address: {
-                type: "string",
-                description: "The user's work address.",
+              execute: async (args: any) => {
+                debugLogClient("tool", "rename_account: executing", args);
+                const data = await gmailApi({
+                  action: "renameAccount",
+                  accountId: args.account_id,
+                  displayName: args.display_name,
+                });
+                if (data.error) return { error: data.error };
+                debugLogClient("tool", "rename_account: success");
+                return {
+                  success: true,
+                  message: `Account renamed to "${args.display_name}".`,
+                };
               },
-              phone_number: {
-                type: "string",
-                description: "The user's phone number.",
-              },
-              conference_link: {
-                type: "string",
-                description: "The user's preferred video conference link (e.g. Zoom, Google Meet).",
-              },
-            },
-            required: [],
-            additionalProperties: false,
-          },
-          execute: async (args: any) => {
-            debugLogClient("tool", "update_my_profile: executing", args);
-            const data = await gmailApi({
-              action: "updateProfile",
-              homeAddress: args.home_address,
-              workAddress: args.work_address,
-              phoneNumber: args.phone_number,
-              conferenceLink: args.conference_link,
-            });
-            if (data.error) { debugLogClient("error", "update_my_profile: failed", data.error); return { error: data.error }; }
-            debugLogClient("tool", "update_my_profile: success");
-            return { success: true, message: "Profile updated." };
-          },
-        }),
+            }),
 
-        tool({
-          name: "get_memories",
-          description:
-            "Retrieve the user's saved memories — a freeform notes document the user has asked you to remember. Use this when the user asks 'what do you remember about me?', 'do you have any notes?', or when you need context from previous sessions.",
-          parameters: {
-            type: "object",
-            properties: {},
-            required: [],
-            additionalProperties: false,
-          },
-          execute: async () => {
-            debugLogClient("tool", "get_memories: executing");
-            const data = await gmailApi({ action: "getMemories" });
-            if (data.error) { debugLogClient("error", "get_memories: failed", data.error); return { error: data.error }; }
-            debugLogClient("tool", "get_memories: success");
-            return { memories: data.memories || "No memories saved yet." };
-          },
-        }),
-
-        tool({
-          name: "save_memories",
-          description:
-            "Save or update the user's memories. This is a freeform markdown document that persists across sessions. Use this when the user says 'remember that...', 'make a note that...', or asks you to save something for later. Always read existing memories first with get_memories, then append or update rather than overwriting.",
-          parameters: {
-            type: "object",
-            properties: {
-              content: {
-                type: "string",
-                description: "The full updated markdown content to save. Include all existing memories plus any additions.",
+            tool({
+              name: "focus_account",
+              description:
+                "Focus on emails from a single account only. Use this when the user says things like 'just show me work emails', 'focus on personal', or 'I only want to see my work inbox'. This re-fetches emails filtered to that one account and resets the queue.",
+              parameters: {
+                type: "object",
+                properties: {
+                  account_id: {
+                    type: "string",
+                    description: "The ID of the account to focus on.",
+                  },
+                },
+                required: ["account_id"],
+                additionalProperties: false,
               },
-            },
-            required: ["content"],
-            additionalProperties: false,
-          },
-          execute: async (args: any) => {
-            debugLogClient("tool", "save_memories: executing", args);
-            const data = await gmailApi({
-              action: "saveMemories",
-              content: args.content,
-            });
-            if (data.error) { debugLogClient("error", "save_memories: failed", data.error); return { error: data.error }; }
-            debugLogClient("tool", "save_memories: success");
-            return { success: true, message: "Memories saved." };
-          },
-        }),
-      ] : []),
+              execute: async (args: any) => {
+                debugLogClient("tool", "focus_account: executing", args);
+                deps.setFocusedAccountId(args.account_id);
+                // Re-fetch emails for just this account
+                const data = await gmailApi({ action: "list", maxResults: 50, accountId: args.account_id });
+                if (data.error) {
+                  debugLogClient("error", "focus_account: failed", data.error);
+                  return { error: data.error };
+                }
+                const emails = data.emails || [];
+                deps.setEmails(emails);
+                deps.setEmailIndex(0);
+                deps.setNextPageTokens(data.accountPageTokens || {});
+                const account = deps.accounts.find((a) => a.id === args.account_id);
+                const name = account?.displayName || account?.email || "selected account";
+                debugLogClient("tool", `focus_account: focused on ${name}, ${emails.length} emails`);
+                return {
+                  success: true,
+                  focused_account: name,
+                  count: emails.length,
+                  has_more_emails: Object.values(data.accountPageTokens || {}).some((t: any) => t !== null),
+                  emails: emails.map((e: any) => ({
+                    id: e.id,
+                    from: e.from,
+                    to: e.to,
+                    cc: e.cc,
+                    subject: e.subject,
+                    snippet: e.snippet,
+                    date: e.date,
+                  })),
+                };
+              },
+            }),
+
+            tool({
+              name: "focus_all_accounts",
+              description:
+                "Stop focusing on a single account and show emails from all connected accounts again. Use this when the user says 'show me everything', 'all accounts', 'include personal too', or similar.",
+              parameters: {
+                type: "object",
+                properties: {},
+                required: [],
+                additionalProperties: false,
+              },
+              execute: async () => {
+                debugLogClient("tool", "focus_all_accounts: executing");
+                deps.setFocusedAccountId(null);
+                // Re-fetch from all accounts
+                const data = await gmailApi({ action: "list", maxResults: 50 });
+                if (data.error) {
+                  debugLogClient("error", "focus_all_accounts: failed", data.error);
+                  return { error: data.error };
+                }
+                const emails = data.emails || [];
+                deps.setEmails(emails);
+                deps.setEmailIndex(0);
+                deps.setNextPageTokens(data.accountPageTokens || {});
+                debugLogClient("tool", `focus_all_accounts: ${emails.length} emails from all accounts`);
+                return {
+                  success: true,
+                  count: emails.length,
+                  has_more_emails: Object.values(data.accountPageTokens || {}).some((t: any) => t !== null),
+                  emails: emails.map((e: any) => ({
+                    id: e.id,
+                    from: e.from,
+                    to: e.to,
+                    cc: e.cc,
+                    subject: e.subject,
+                    snippet: e.snippet,
+                    date: e.date,
+                    accountId: e.accountId,
+                    accountName: e.accountName,
+                  })),
+                };
+              },
+            }),
+          ]
+        : []),
+
+      // ── Profile & memory tools (DB-only) ────────
+      ...(deps.dbAvailable
+        ? [
+            tool({
+              name: "get_my_profile",
+              description:
+                "Retrieve the user's saved profile: home address, work address, phone number, and conference link.",
+              parameters: {
+                type: "object",
+                properties: {},
+                required: [],
+                additionalProperties: false,
+              },
+              execute: async () => {
+                debugLogClient("tool", "get_my_profile: executing");
+                const data = await gmailApi({ action: "getProfile" });
+                if (data.error) { debugLogClient("error", "get_my_profile: failed", data.error); return { error: data.error }; }
+                debugLogClient("tool", "get_my_profile: success", data);
+                return data;
+              },
+            }),
+
+            tool({
+              name: "update_my_profile",
+              description:
+                "Update the user's saved profile. Only provide the fields that need to change.",
+              parameters: {
+                type: "object",
+                properties: {
+                  home_address: { type: "string", description: "The user's home address." },
+                  work_address: { type: "string", description: "The user's work address." },
+                  phone_number: { type: "string", description: "The user's phone number." },
+                  conference_link: {
+                    type: "string",
+                    description: "The user's preferred video conference link.",
+                  },
+                },
+                required: [],
+                additionalProperties: false,
+              },
+              execute: async (args: any) => {
+                debugLogClient("tool", "update_my_profile: executing", args);
+                const data = await gmailApi({
+                  action: "updateProfile",
+                  homeAddress: args.home_address,
+                  workAddress: args.work_address,
+                  phoneNumber: args.phone_number,
+                  conferenceLink: args.conference_link,
+                });
+                if (data.error) { debugLogClient("error", "update_my_profile: failed", data.error); return { error: data.error }; }
+                debugLogClient("tool", "update_my_profile: success");
+                return { success: true, message: "Profile updated." };
+              },
+            }),
+
+            tool({
+              name: "get_memories",
+              description:
+                "Retrieve the user's saved memories — a freeform notes document.",
+              parameters: {
+                type: "object",
+                properties: {},
+                required: [],
+                additionalProperties: false,
+              },
+              execute: async () => {
+                debugLogClient("tool", "get_memories: executing");
+                const data = await gmailApi({ action: "getMemories" });
+                if (data.error) { debugLogClient("error", "get_memories: failed", data.error); return { error: data.error }; }
+                debugLogClient("tool", "get_memories: success");
+                return { memories: data.memories || "No memories saved yet." };
+              },
+            }),
+
+            tool({
+              name: "save_memories",
+              description:
+                "Save or update the user's memories. Always read existing memories first with get_memories, then append or update.",
+              parameters: {
+                type: "object",
+                properties: {
+                  content: {
+                    type: "string",
+                    description: "The full updated markdown content to save.",
+                  },
+                },
+                required: ["content"],
+                additionalProperties: false,
+              },
+              execute: async (args: any) => {
+                debugLogClient("tool", "save_memories: executing", args);
+                const data = await gmailApi({
+                  action: "saveMemories",
+                  content: args.content,
+                });
+                if (data.error) { debugLogClient("error", "save_memories: failed", data.error); return { error: data.error }; }
+                debugLogClient("tool", "save_memories: success");
+                return { success: true, message: "Memories saved." };
+              },
+            }),
+          ]
+        : []),
 
       tool({
         name: "mute_microphone",

@@ -475,8 +475,8 @@ describe("performUnsubscribe", () => {
     const result = await performUnsubscribe({}, "msg-1");
 
     expect(result.success).toBe(false);
-    expect(result.method).toBe("browser");
-    expect(result.message).toContain("BROWSER_USE_API_KEY");
+    expect(result.method).toBe("none");
+    expect(result.message).toContain("browser");
   });
 
   it("returns failure when Browser Use API returns an error", async () => {

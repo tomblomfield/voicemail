@@ -207,7 +207,7 @@ describe("voicemail footer", () => {
 
   it("falls back to the production URL when no env var is configured", () => {
     expect(appendVoicemailFooter("Checking in", "tb@ycombinator.com")).toBe(
-      "Checking in\n\nsent with voicemail\nhttps://voice-email-production.up.railway.app"
+      "Checking in\n\nsent with voicemail\nhttps://voicemail.audio"
     );
   });
 

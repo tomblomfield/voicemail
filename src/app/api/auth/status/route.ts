@@ -5,31 +5,68 @@ import {
   getMissingScopes,
   GMAIL_FILTER_WRITE_SCOPE,
 } from "@/app/lib/gmail";
+import { SESSION_COOKIE_NAME, getSessionUserId } from "@/app/lib/session";
+import { getGoogleAccounts } from "@/app/lib/db";
 
 export async function GET(request: NextRequest) {
-  const cookie = request.cookies.get("gmail_tokens");
-  if (!cookie) {
+  const sessionCookie = request.cookies.get(SESSION_COOKIE_NAME);
+  if (!sessionCookie) {
     return NextResponse.json({
       authenticated: false,
+      accounts: [],
       filterWriteEnabled: false,
-      missingScopes: [GMAIL_FILTER_WRITE_SCOPE],
     });
   }
 
-  try {
-    const tokens = decryptTokens(cookie.value);
-    const authenticated = hasRequiredGoogleScopes(tokens);
-    const missingScopes = getMissingScopes(tokens, [GMAIL_FILTER_WRITE_SCOPE]);
-    return NextResponse.json({
-      authenticated,
-      filterWriteEnabled: missingScopes.length === 0,
-      missingScopes,
-    });
-  } catch {
+  const userId = getSessionUserId(sessionCookie.value);
+  if (!userId) {
     return NextResponse.json({
       authenticated: false,
+      accounts: [],
       filterWriteEnabled: false,
-      missingScopes: [GMAIL_FILTER_WRITE_SCOPE],
     });
   }
+
+  const dbAccounts = await getGoogleAccounts(userId);
+  const accounts: Array<{
+    id: string;
+    email: string;
+    displayName: string | null;
+    isPrimary: boolean;
+    filterWriteEnabled: boolean;
+  }> = [];
+
+  for (const a of dbAccounts) {
+    try {
+      const tokens = decryptTokens(a.encrypted_tokens);
+      if (hasRequiredGoogleScopes(tokens)) {
+        const missingScopes = getMissingScopes(tokens, [
+          GMAIL_FILTER_WRITE_SCOPE,
+        ]);
+        accounts.push({
+          id: a.id,
+          email: a.email,
+          displayName: a.display_name,
+          isPrimary: a.is_primary,
+          filterWriteEnabled: missingScopes.length === 0,
+        });
+      }
+    } catch {
+      // Skip accounts with invalid tokens
+    }
+  }
+
+  if (accounts.length === 0) {
+    return NextResponse.json({
+      authenticated: false,
+      accounts: [],
+      filterWriteEnabled: false,
+    });
+  }
+
+  return NextResponse.json({
+    authenticated: true,
+    accounts,
+    filterWriteEnabled: accounts.every((a) => a.filterWriteEnabled),
+  });
 }

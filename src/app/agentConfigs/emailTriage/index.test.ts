@@ -27,7 +27,8 @@ function makeDeps(emails: EmailData[] = []) {
     muted: false,
     stopped: false,
     loggedOut: false,
-    nextPageToken: undefined as string | undefined,
+    pageTokens: {} as Record<string, string | null>,
+    focusedAccountId: null as string | null,
   };
   return {
     state,
@@ -47,12 +48,15 @@ function makeDeps(emails: EmailData[] = []) {
       getActionSummary: () => ({ ...state.actions }),
       calendarProfile: () => null,
       setCalendarProfile: () => {},
-      nextPageToken: () => state.nextPageToken,
-      setNextPageToken: (t: string | undefined) => { state.nextPageToken = t; },
-      dbAvailable: false,
+      nextPageTokens: () => state.pageTokens,
+      setNextPageTokens: (tokens: Record<string, string | null>) => { state.pageTokens = tokens; },
+      dbAvailable: true,
       onMute: () => { state.muted = true; },
       onStop: () => { state.stopped = true; },
       onLogout: () => { state.loggedOut = true; },
+      accounts: [],
+      focusedAccountId: () => state.focusedAccountId,
+      setFocusedAccountId: (id: string | null) => { state.focusedAccountId = id; },
     } satisfies EmailTriageDeps,
   };
 }
