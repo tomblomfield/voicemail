@@ -14,9 +14,36 @@ function getRedirectUri(request: NextRequest): string {
   return `${proto}://${host}/api/auth/callback`;
 }
 
+/**
+ * Detect in-app browsers (WebViews) that Google blocks for OAuth.
+ * Google returns 403 disallowed_useragent for these.
+ */
+function isInAppBrowser(userAgent: string): boolean {
+  const patterns = [
+    /FBAN|FBAV/i,           // Facebook
+    /Instagram/i,            // Instagram
+    /Twitter|X-Twitter/i,    // Twitter / X
+    /LinkedInApp/i,          // LinkedIn
+    /Line\//i,               // Line
+    /MicroMessenger/i,       // WeChat
+    /Snapchat/i,             // Snapchat
+    /Reddit/i,               // Reddit
+    /Pinterest/i,            // Pinterest
+    /TikTok/i,               // TikTok
+    /; wv\)/i,               // Android WebView
+  ];
+  return patterns.some((p) => p.test(userAgent));
+}
+
 const MAX_ACCOUNTS = 5;
 
 export async function GET(request: NextRequest) {
+  // Block in-app browsers before attempting Google OAuth
+  const ua = request.headers.get("user-agent") || "";
+  if (isInAppBrowser(ua)) {
+    return NextResponse.redirect(new URL("/open-in-browser", request.url));
+  }
+
   const addAccount = request.nextUrl.searchParams.get("addAccount") === "true";
   const redirectUri = getRedirectUri(request);
 
