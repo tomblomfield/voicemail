@@ -3,7 +3,7 @@ import {
   decryptTokens,
   hasRequiredGoogleScopes,
 } from "@/app/lib/gmail";
-import { debugLog } from "@/app/lib/debugLog";
+import { debugLog, debugLogVerbose } from "@/app/lib/debugLog";
 import {
   initDb,
   upsertUser,
@@ -75,6 +75,7 @@ export async function GET(request: NextRequest) {
       model: data.model,
       expires_at: data.expires_at,
     });
+    debugLogVerbose("api", "OpenAI realtime session FULL RESPONSE", data);
     return NextResponse.json({
       ...data,
       dbAvailable: isDbAvailable(),

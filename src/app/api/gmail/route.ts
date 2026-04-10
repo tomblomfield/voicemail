@@ -199,7 +199,7 @@ async function handleAction(
     case "archive": {
       const account = getAccount(auth, params.accountId);
       if (!account) return { error: "Account not found" };
-      await archiveEmail(account.tokens, params.messageId);
+      await archiveEmail(account.tokens, params.threadId);
       return { success: true };
     }
     case "markRead": {
@@ -221,7 +221,7 @@ async function handleAction(
     case "unsubscribe": {
       const account = getAccount(auth, params.accountId);
       if (!account) return { error: "Account not found" };
-      return await performUnsubscribe(account.tokens, params.messageId);
+      return await performUnsubscribe(account.tokens, params.messageId, params.threadId);
     }
 
     // ── Search (multi-account) ────────────────────

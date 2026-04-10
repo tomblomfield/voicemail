@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { decryptTokens, hasRequiredGoogleScopes } from "@/app/lib/gmail";
-import { debugLog } from "@/app/lib/debugLog";
+import { debugLog, debugLogVerbose } from "@/app/lib/debugLog";
 import { SESSION_COOKIE_NAME, getSessionUserId } from "@/app/lib/session";
 import { getGoogleAccounts } from "@/app/lib/db";
 
@@ -31,8 +31,17 @@ export async function POST(req: NextRequest) {
   debugLog("llm", "POST /api/responses — request", {
     model: body.model,
     instructions: body.instructions?.slice?.(0, 200),
-    input: body.input,
+    inputCount: Array.isArray(body.input) ? body.input.length : 1,
     text_format: body.text?.format?.type,
+  });
+  debugLogVerbose("llm", "POST /api/responses — FULL REQUEST BODY", {
+    model: body.model,
+    instructions: body.instructions,
+    input: body.input,
+    text: body.text,
+    tools: body.tools,
+    temperature: body.temperature,
+    max_output_tokens: body.max_output_tokens,
   });
 
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -53,7 +62,13 @@ async function structuredResponse(openai: OpenAI, body: any) {
     });
     debugLog("llm", `Structured response [${Date.now() - startMs}ms]`, {
       id: response.id,
+      usage: (response as any).usage,
+    });
+    debugLogVerbose("llm", "Structured response FULL LLM RESPONSE", {
+      id: response.id,
+      model: (response as any).model,
       output: response.output,
+      usage: (response as any).usage,
     });
 
     return NextResponse.json(response);
@@ -73,7 +88,13 @@ async function textResponse(openai: OpenAI, body: any) {
     });
     debugLog("llm", `Text response [${Date.now() - startMs}ms]`, {
       id: response.id,
+      usage: (response as any).usage,
+    });
+    debugLogVerbose("llm", "Text response FULL LLM RESPONSE", {
+      id: response.id,
+      model: (response as any).model,
       output: response.output,
+      usage: (response as any).usage,
     });
 
     return NextResponse.json(response);

@@ -58,6 +58,36 @@ export function debugLog(category: Category, label: string, data?: unknown) {
   appendToFile(fileLine);
 }
 
+/**
+ * Verbose file-only logging — writes full payloads to debug.log without
+ * cluttering the terminal. Use for complete API responses, LLM request
+ * bodies, and other high-volume data you want during audits.
+ */
+export function debugLogVerbose(category: Category, label: string, data?: unknown) {
+  if (!IS_DEV) return;
+  const ts = new Date().toISOString().slice(11, 23);
+  const fileLine = data !== undefined
+    ? `[${ts}] [${category.toUpperCase()}] [VERBOSE] ${label} ${formatValue(data)}`
+    : `[${ts}] [${category.toUpperCase()}] [VERBOSE] ${label}`;
+  appendToFile(fileLine);
+}
+
+/**
+ * Client-side verbose logging — fires-and-forgets a POST to /api/log which
+ * writes to debug.log. Use for full tool results, email bodies, and other
+ * payloads flowing between client tools and the LLM. No console output.
+ */
+export function debugLogClientVerbose(category: Category, label: string, data?: unknown) {
+  if (!IS_DEV) return;
+  try {
+    fetch("/api/log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event: label, data, verbose: true, category }),
+    }).catch(() => {}); // fire-and-forget
+  } catch {}
+}
+
 // Client-side version (no ANSI colors, uses console.group)
 export function debugLogClient(category: Category, label: string, data?: unknown) {
   if (!IS_DEV) return;

@@ -218,8 +218,20 @@ export function extractUnsubscribeLinks(html: string): string[] {
  */
 export async function performUnsubscribe(
   tokens: any,
-  messageId: string
+  messageId: string,
+  threadId?: string
 ): Promise<UnsubscribeResult> {
+  // Resolve threadId if not provided (needed for thread-level archive)
+  if (!threadId) {
+    const gmail = getGmailClient(tokens);
+    const msg = await gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "minimal",
+    });
+    threadId = msg.data.threadId || undefined;
+  }
+
   const info = await getUnsubscribeInfo(tokens, messageId);
 
   debugLog("unsubscribe", "Unsubscribe info extracted", {
@@ -252,7 +264,7 @@ export async function performUnsubscribe(
     try {
       const result = await oneClickUnsubscribe(info.httpsUrls[0]);
       if (result.success) {
-        await archiveEmail(tokens, messageId);
+        await archiveEmail(tokens, threadId || messageId);
         return {
           ...result,
           message: `Unsubscribed from ${info.senderName} using one-click unsubscribe. Email archived.`,
@@ -269,7 +281,7 @@ export async function performUnsubscribe(
     try {
       const result = await mailtoUnsubscribe(tokens, info.mailtoUrls[0]);
       if (result.success) {
-        await archiveEmail(tokens, messageId);
+        await archiveEmail(tokens, threadId || messageId);
         return {
           ...result,
           message: `Sent unsubscribe email for ${info.senderName}. Email archived.`,
@@ -290,7 +302,7 @@ export async function performUnsubscribe(
       const result = await browserUnsubscribe(urlToVisit, info.senderName);
       if (result.browserTaskId) {
         // Session was created — archive and report pending
-        await archiveEmail(tokens, messageId);
+        await archiveEmail(tokens, threadId || messageId);
         return {
           ...result,
           message: `Started unsubscribing from ${info.senderName} in the background. Email archived.`,

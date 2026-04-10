@@ -1,6 +1,6 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import type { InferredCalendarProfile } from "@/app/lib/calendar";
-import { debugLogClient } from "@/app/lib/debugLog";
+import { debugLogClient, debugLogClientVerbose } from "@/app/lib/debugLog";
 
 async function gmailApi(body: Record<string, any>) {
   debugLogClient("tool", `gmailApi request: action=${body.action}`, body);
@@ -108,6 +108,13 @@ export function createEmailTriageAgent(deps: EmailTriageDeps) {
     };
   }
 
+  // Helper: look up threadId for a given email message
+  function getThreadIdForEmail(messageId: string): string | undefined {
+    const emails = deps.emails();
+    const email = emails.find((e) => e.id === messageId);
+    return email?.threadId;
+  }
+
   // Helper: look up accountId for a given email message
   function getAccountIdForEmail(messageId: string): string | undefined {
     const emails = deps.emails();
@@ -115,7 +122,7 @@ export function createEmailTriageAgent(deps: EmailTriageDeps) {
     return email?.accountId;
   }
 
-  return new RealtimeAgent({
+  const agent = new RealtimeAgent({
     name: "emailTriage",
     voice: "ash",
     handoffDescription: "Voice email and calendar assistant for hands-free driving",
@@ -284,7 +291,8 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
             result.account_counts = accountCounts;
           }
 
-          debugLogClient("tool", `get_email_count: ${emails.length} emails`, result);
+          debugLogClient("tool", `get_email_count: ${emails.length} emails`);
+          debugLogClientVerbose("tool", "get_email_count → LLM TOOL RESULT", result);
           return result;
         },
       }),
@@ -330,7 +338,8 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
                 : {}),
             })),
           };
-          debugLogClient("tool", `reload_emails: ${emails.length} emails`, result);
+          debugLogClient("tool", `reload_emails: ${emails.length} emails`);
+          debugLogClientVerbose("tool", "reload_emails → LLM TOOL RESULT", result);
           return result;
         },
       }),
@@ -387,7 +396,8 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
                 : {}),
             })),
           };
-          debugLogClient("tool", `fetch_more_emails: ${newEmails.length} new emails`, result);
+          debugLogClient("tool", `fetch_more_emails: ${newEmails.length} new emails`);
+          debugLogClientVerbose("tool", "fetch_more_emails → LLM TOOL RESULT", result);
           return result;
         },
       }),
@@ -494,7 +504,8 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
             emailResult.accountName = email.accountName;
           }
 
-          debugLogClient("tool", `get_next_email: returning email from=${email.from} subject="${email.subject}"`, { ...emailResult, body: emailResult.body.slice(0, 200) + "..." });
+          debugLogClient("tool", `get_next_email: returning email from=${email.from} subject="${email.subject}" bodyLen=${emailResult.body.length} threadLen=${threadMessages.length}`);
+          debugLogClientVerbose("tool", "get_next_email → LLM TOOL RESULT (FULL)", emailResult);
           return emailResult;
         },
       }),
@@ -535,7 +546,7 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
           if (data.error) { debugLogClient("error", "reply_to_email: failed", data.error); return { error: data.error }; }
           await gmailApi({
             action: "archive",
-            messageId: args.message_id,
+            threadId: args.thread_id,
             accountId,
           });
           deps.recordAction("reply");
@@ -547,7 +558,7 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
       tool({
         name: "archive_email",
         description:
-          "Archive the current email (remove from inbox). Call this when the user says to archive.",
+          "Archive the current email thread (remove from inbox). This archives the entire conversation. Call this when the user says to archive.",
         parameters: {
           type: "object",
           properties: {
@@ -562,9 +573,10 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
         execute: async (args: any) => {
           debugLogClient("tool", "archive_email: executing", args);
           const accountId = getAccountIdForEmail(args.message_id);
+          const threadId = getThreadIdForEmail(args.message_id);
           const data = await gmailApi({
             action: "archive",
-            messageId: args.message_id,
+            threadId: threadId || args.message_id,
             accountId,
           });
           if (data.error) { debugLogClient("error", "archive_email: failed", data.error); return { error: data.error }; }
@@ -625,9 +637,11 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
         execute: async (args: any) => {
           debugLogClient("tool", "unsubscribe_from_email: executing", args);
           const accountId = getAccountIdForEmail(args.message_id);
+          const threadId = getThreadIdForEmail(args.message_id);
           const data = await gmailApi({
             action: "unsubscribe",
             messageId: args.message_id,
+            threadId,
             accountId,
           });
           if (data.error) {
@@ -721,7 +735,8 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
                 : {}),
             })),
           };
-          debugLogClient("tool", `search_emails: ${result.count} results`, result);
+          debugLogClient("tool", `search_emails: ${result.count} results`);
+          debugLogClientVerbose("tool", "search_emails → LLM TOOL RESULT", result);
           return result;
         },
       }),
@@ -1494,4 +1509,15 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
 
     handoffs: [],
   });
+
+  debugLogClientVerbose("llm", "REALTIME AGENT CONFIG", {
+    name: agent.name,
+    voice: agent.voice,
+    instructionLength: agent.instructions?.length,
+    instructions: agent.instructions,
+    toolCount: agent.tools?.length,
+    toolNames: agent.tools?.map((t: any) => t.name),
+  });
+
+  return agent;
 }

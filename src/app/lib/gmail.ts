@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { getOAuth2Client, getGmailClient } from "@/app/lib/google-auth";
+import { debugLog, debugLogVerbose } from "@/app/lib/debugLog";
 
 const REQUIRED_GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
@@ -495,36 +496,56 @@ export async function getUnreadEmails(
   pageToken?: string
 ): Promise<{ emails: EmailSummary[]; nextPageToken?: string }> {
   const gmail = getGmailClient(tokens);
-  const res = await gmail.users.messages.list({
+
+  // Use threads.list instead of messages.list so each conversation appears
+  // exactly once, even when multiple messages in a thread are unread.
+  const startMs = Date.now();
+  const res = await gmail.users.threads.list({
     userId: "me",
     q: "is:unread in:inbox",
     maxResults,
     ...(pageToken ? { pageToken } : {}),
   });
+  debugLog("api", `threads.list [${Date.now() - startMs}ms] — ${res.data.threads?.length ?? 0} threads`);
+  debugLogVerbose("api", "threads.list FULL RESPONSE", {
+    resultSizeEstimate: res.data.resultSizeEstimate,
+    threads: res.data.threads?.map(t => ({ id: t.id, snippet: t.snippet })),
+    nextPageToken: res.data.nextPageToken,
+  });
 
-  if (!res.data.messages) return { emails: [], nextPageToken: undefined };
+  if (!res.data.threads) return { emails: [], nextPageToken: undefined };
 
   const emails: EmailSummary[] = await Promise.all(
-    res.data.messages.map(async (msg) => {
-      const detail = await gmail.users.messages.get({
+    res.data.threads.map(async (thread) => {
+      const threadGetStart = Date.now();
+      const threadDetail = await gmail.users.threads.get({
         userId: "me",
-        id: msg.id!,
+        id: thread.id!,
         format: "metadata",
         metadataHeaders: ["From", "To", "Cc", "Subject", "Date"],
       });
 
-      const headers = detail.data.payload?.headers || [];
+      const messages = threadDetail.data.messages || [];
+      debugLogVerbose("api", `threads.get(${thread.id}) [${Date.now() - threadGetStart}ms]`, {
+        messageCount: messages.length,
+        messageIds: messages.map(m => m.id),
+        labels: messages.map(m => m.labelIds),
+      });
+      // Use the latest message in the thread for display metadata
+      const latestMsg = messages[messages.length - 1];
+      const headers = latestMsg?.payload?.headers || [];
       const getHeader = (name: string) =>
         headers.find((h) => h.name === name)?.value || "";
 
       return {
-        id: msg.id!,
-        threadId: msg.threadId!,
+        // id = latest message ID (needed for message-level ops like reply, unsubscribe)
+        id: latestMsg?.id || thread.id!,
+        threadId: thread.id!,
         from: getHeader("From"),
         to: getHeader("To"),
         cc: getHeader("Cc"),
         subject: getHeader("Subject"),
-        snippet: detail.data.snippet || "",
+        snippet: latestMsg?.snippet || thread.snippet || "",
         date: getHeader("Date"),
       };
     })
@@ -561,10 +582,20 @@ export async function getEmailBody(
   messageId: string
 ): Promise<string> {
   const gmail = getGmailClient(tokens);
+  const startMs = Date.now();
   const res = await gmail.users.messages.get({
     userId: "me",
     id: messageId,
     format: "full",
+  });
+  debugLog("api", `messages.get(${messageId}, full) [${Date.now() - startMs}ms]`);
+  debugLogVerbose("api", `getEmailBody FULL RESPONSE (${messageId})`, {
+    threadId: res.data.threadId,
+    labelIds: res.data.labelIds,
+    snippet: res.data.snippet,
+    sizeEstimate: res.data.sizeEstimate,
+    mimeType: res.data.payload?.mimeType,
+    partCount: res.data.payload?.parts?.length,
   });
 
   const payload = res.data.payload;
@@ -599,6 +630,7 @@ export async function getThreadMessages(
   maxMessages = 5
 ): Promise<{ from: string; date: string; body: string }[]> {
   const gmail = getGmailClient(tokens);
+  const startMs = Date.now();
   const thread = await gmail.users.threads.get({
     userId: "me",
     id: threadId,
@@ -606,6 +638,18 @@ export async function getThreadMessages(
   });
 
   const messages = thread.data.messages || [];
+  debugLog("api", `getThreadMessages(${threadId}) [${Date.now() - startMs}ms] — ${messages.length} messages, showing last ${maxMessages}`);
+  debugLogVerbose("api", `getThreadMessages FULL RESPONSE (${threadId})`, {
+    totalMessages: messages.length,
+    messages: messages.map(m => ({
+      id: m.id,
+      labelIds: m.labelIds,
+      snippet: m.snippet,
+      sizeEstimate: m.sizeEstimate,
+      from: m.payload?.headers?.find(h => h.name === "From")?.value,
+      date: m.payload?.headers?.find(h => h.name === "Date")?.value,
+    })),
+  });
   // Take the last N messages (most recent context)
   const recent = messages.slice(-maxMessages);
 
@@ -683,21 +727,38 @@ export async function sendReply(
 
   const encoded = Buffer.from(raw).toString("base64url");
 
-  await gmail.users.messages.send({
+  const startMs = Date.now();
+  const sendRes = await gmail.users.messages.send({
     userId: "me",
     requestBody: { raw: encoded, threadId },
+  });
+  debugLog("api", `sendReply messages.send [${Date.now() - startMs}ms]`);
+  debugLogVerbose("api", "sendReply FULL RESPONSE", {
+    id: sendRes.data.id,
+    threadId: sendRes.data.threadId,
+    labelIds: sendRes.data.labelIds,
+    to,
+    subject,
   });
 }
 
 export async function archiveEmail(
   tokens: any,
-  messageId: string
+  threadId: string
 ): Promise<void> {
   const gmail = getGmailClient(tokens);
-  await gmail.users.messages.modify({
+  // Use threads.modify so the INBOX label is removed from every message
+  // in the conversation — not just a single message.
+  const startMs = Date.now();
+  const res = await gmail.users.threads.modify({
     userId: "me",
-    id: messageId,
+    id: threadId,
     requestBody: { removeLabelIds: ["INBOX"] },
+  });
+  debugLog("api", `archiveEmail threads.modify(${threadId}) [${Date.now() - startMs}ms]`);
+  debugLogVerbose("api", `archiveEmail FULL RESPONSE (${threadId})`, {
+    id: res.data.id,
+    messages: (res.data.messages || []).map((m: any) => ({ id: m.id, labelIds: m.labelIds })),
   });
 }
 
