@@ -30,18 +30,21 @@ afterAll(async () => {
 describe("upsertUser", () => {
   it("creates a new user", async () => {
     const user = await upsertUser(TEST_EMAIL);
-    expect(user.email).toBe(TEST_EMAIL);
-    expect(user.id).toBeTruthy();
+    expect(user).not.toBeNull();
+    expect(user!.email).toBe(TEST_EMAIL);
+    expect(user!.id).toBeTruthy();
   });
 
   it("returns the same user on repeat call", async () => {
     const user = await upsertUser(TEST_EMAIL);
-    expect(user.email).toBe(TEST_EMAIL);
+    expect(user).not.toBeNull();
+    expect(user!.email).toBe(TEST_EMAIL);
   });
 
   it("normalizes email to lowercase", async () => {
     const user = await upsertUser(TEST_EMAIL.toUpperCase());
-    expect(user.email).toBe(TEST_EMAIL);
+    expect(user).not.toBeNull();
+    expect(user!.email).toBe(TEST_EMAIL);
   });
 });
 
@@ -49,11 +52,11 @@ describe("getUserByEmail", () => {
   it("returns the user with all profile fields", async () => {
     const user = await getUserByEmail(TEST_EMAIL);
     expect(user).not.toBeNull();
-    expect(user.email).toBe(TEST_EMAIL);
-    expect(user.home_address).toBeNull();
-    expect(user.work_address).toBeNull();
-    expect(user.phone_number).toBeNull();
-    expect(user.conference_link).toBeNull();
+    expect(user!.email).toBe(TEST_EMAIL);
+    expect(user!.home_address).toBeNull();
+    expect(user!.work_address).toBeNull();
+    expect(user!.phone_number).toBeNull();
+    expect(user!.conference_link).toBeNull();
   });
 
   it("returns null for unknown email", async () => {
