@@ -170,7 +170,63 @@ function getHeaderValue(headers: any[], name: string) {
   return headers.find((h) => h.name === name)?.value || "";
 }
 
-function parseMailbox(value: string): { name: string; email: string } {
+export interface MailboxAddress {
+  name: string;
+  email: string;
+}
+
+export interface ThreadParticipant {
+  name: string;
+  email: string;
+}
+
+export interface ThreadMessage {
+  from: string;
+  to: string;
+  cc: string;
+  date: string;
+  subject: string;
+  replyTo: string;
+  messageId: string;
+  body: string;
+}
+
+function splitAddressHeader(value: string): string[] {
+  const entries: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let angleDepth = 0;
+
+  for (const char of value) {
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      current += char;
+      continue;
+    }
+
+    if (!inQuotes) {
+      if (char === "<") {
+        angleDepth++;
+      } else if (char === ">") {
+        angleDepth = Math.max(0, angleDepth - 1);
+      } else if (char === "," && angleDepth === 0) {
+        if (current.trim()) entries.push(current.trim());
+        current = "";
+        continue;
+      }
+    }
+
+    current += char;
+  }
+
+  if (current.trim()) {
+    entries.push(current.trim());
+  }
+
+  return entries;
+}
+
+function parseMailbox(value: string): MailboxAddress {
   const trimmed = value.trim();
   const bracketMatch = trimmed.match(/^(.*?)(?:<([^>]+)>)$/);
   if (bracketMatch) {
@@ -187,11 +243,232 @@ function parseMailbox(value: string): { name: string; email: string } {
   return { name: trimmed, email: "" };
 }
 
-function parseAddressList(value: string) {
-  return value
-    .split(",")
+export function parseAddressList(value: string): MailboxAddress[] {
+  return splitAddressHeader(value)
     .map((entry) => parseMailbox(entry))
     .filter((entry) => entry.name || entry.email);
+}
+
+function formatMailbox(address: MailboxAddress): string {
+  if (address.name && address.email) {
+    return `${address.name} <${address.email}>`;
+  }
+  return address.email || address.name;
+}
+
+function dedupeAddresses(
+  values: MailboxAddress[],
+  excludedEmails: string[] = []
+): MailboxAddress[] {
+  const excluded = new Set(excludedEmails.map(normalizeEmailAddress));
+  const seen = new Set<string>();
+
+  return values.filter((value) => {
+    const email = value.email ? normalizeEmailAddress(value.email) : "";
+    const key = email || value.name.trim().toLowerCase();
+
+    if (!key) return false;
+    if (email && excluded.has(email)) return false;
+    if (seen.has(key)) return false;
+
+    seen.add(key);
+    return true;
+  });
+}
+
+function mergeAddressHeaders(
+  baseValues: string[],
+  extraValues: string[] = [],
+  excludedEmails: string[] = []
+): string {
+  const merged = dedupeAddresses(
+    [...baseValues, ...extraValues].flatMap((value) => parseAddressList(value)),
+    excludedEmails
+  );
+  return merged.map(formatMailbox).join(", ");
+}
+
+function ensureSubjectPrefix(subject: string, prefix: "Re" | "Fwd"): string {
+  const trimmed = subject.trim();
+  const pattern =
+    prefix === "Re" ? /^\s*re:\s*/i : /^\s*(fwd?|fw):\s*/i;
+
+  if (!trimmed) {
+    return `${prefix}:`;
+  }
+
+  return pattern.test(trimmed) ? trimmed : `${prefix}: ${trimmed}`;
+}
+
+export function formatReplySubject(subject: string): string {
+  return ensureSubjectPrefix(subject, "Re");
+}
+
+export function formatForwardSubject(subject: string): string {
+  return ensureSubjectPrefix(subject, "Fwd");
+}
+
+function formatReplyDate(dateHeader: string): string {
+  const parsed = new Date(dateHeader);
+  if (Number.isNaN(parsed.getTime())) {
+    return dateHeader.trim();
+  }
+
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+  }).format(parsed);
+  const month = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+  }).format(parsed);
+  const day = new Intl.DateTimeFormat("en-US", {
+    day: "numeric",
+  }).format(parsed);
+  const year = new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+  }).format(parsed);
+  const time = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(parsed);
+
+  return `${weekday}, ${month} ${day}, ${year} at ${time}`;
+}
+
+function extractTextFromPayload(payload: any): string {
+  if (!payload) return "";
+
+  if (payload.mimeType === "text/plain" && payload.body?.data) {
+    return Buffer.from(payload.body.data, "base64url").toString("utf-8");
+  }
+
+  if (payload.mimeType === "text/html" && payload.body?.data) {
+    return Buffer.from(payload.body.data, "base64url")
+      .toString("utf-8")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/\r\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/[ \t]+\n/g, "\n")
+      .trim();
+  }
+
+  if (payload.body?.data) {
+    return Buffer.from(payload.body.data, "base64url").toString("utf-8");
+  }
+
+  if (payload.parts) {
+    for (const part of payload.parts) {
+      const text = extractTextFromPayload(part);
+      if (text) return text;
+    }
+  }
+
+  return "";
+}
+
+function normalizeBodyForCompose(body: string): string {
+  return body.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd();
+}
+
+function quoteBody(body: string): string {
+  const normalized = normalizeBodyForCompose(body);
+  if (!normalized) return ">";
+
+  return normalized
+    .split("\n")
+    .map((line) => (line ? `> ${line}` : ">"))
+    .join("\r\n");
+}
+
+export function formatGmailReplyBody(
+  replyText: string,
+  original: { date: string; from: string; body: string }
+): string {
+  const sections = [normalizeBodyForCompose(replyText)];
+  const formattedDate = formatReplyDate(original.date);
+  const intro = formattedDate
+    ? `On ${formattedDate}, ${original.from} wrote:`
+    : `${original.from} wrote:`;
+  sections.push(`${intro}\r\n${quoteBody(original.body)}`);
+
+  return sections.filter(Boolean).join("\r\n\r\n");
+}
+
+export function formatGmailForwardBody(
+  forwardText: string,
+  original: {
+    from: string;
+    date: string;
+    subject: string;
+    to: string;
+    cc: string;
+    body: string;
+  }
+): string {
+  const headerLines = [
+    "---------- Forwarded message ---------",
+    `From: ${original.from}`,
+    `Date: ${original.date}`,
+    `Subject: ${original.subject}`,
+    `To: ${original.to}`,
+    ...(original.cc ? [`Cc: ${original.cc}`] : []),
+  ];
+
+  return [normalizeBodyForCompose(forwardText), headerLines.join("\r\n"), normalizeBodyForCompose(original.body)]
+    .filter(Boolean)
+    .join("\r\n\r\n");
+}
+
+function buildReferencesHeader(references: string, messageId: string): string {
+  const parts = `${references || ""} ${messageId || ""}`
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  return Array.from(new Set(parts)).join(" ");
+}
+
+function buildRawMessage(headers: Array<[string, string]>, body: string): string {
+  return [
+    "MIME-Version: 1.0",
+    `Content-Type: text/plain; charset="UTF-8"`,
+    ...headers
+      .filter(([, value]) => value.trim().length > 0)
+      .map(([name, value]) => `${name}: ${value}`),
+    "",
+    body.replace(/\r\n/g, "\n").split("\n").join("\r\n"),
+  ].join("\r\n");
+}
+
+async function getMessageContext(tokens: any, messageId: string) {
+  const gmail = getGmailClient(tokens);
+  const res = await gmail.users.messages.get({
+    userId: "me",
+    id: messageId,
+    format: "full",
+  });
+
+  const headers = getHeaders(res);
+
+  return {
+    from: getHeaderValue(headers, "From"),
+    replyTo: getHeaderValue(headers, "Reply-To") || getHeaderValue(headers, "From"),
+    to: getHeaderValue(headers, "To"),
+    cc: getHeaderValue(headers, "Cc"),
+    subject: getHeaderValue(headers, "Subject"),
+    date: getHeaderValue(headers, "Date"),
+    messageId: getHeaderValue(headers, "Message-ID"),
+    references: getHeaderValue(headers, "References"),
+    body: extractTextFromPayload(res.data.payload) || res.data.snippet || "",
+    threadId: res.data.threadId || "",
+  };
 }
 
 export function normalizeSubjectForFilter(subject: string): string {
@@ -601,34 +878,16 @@ export async function getEmailBody(
   const payload = res.data.payload;
   if (!payload) return "";
 
-  function extractText(parts: any[]): string {
-    for (const part of parts) {
-      if (part.mimeType === "text/plain" && part.body?.data) {
-        return Buffer.from(part.body.data, "base64url").toString("utf-8");
-      }
-      if (part.parts) {
-        const text = extractText(part.parts);
-        if (text) return text;
-      }
-    }
-    return "";
-  }
-
-  if (payload.body?.data) {
-    return Buffer.from(payload.body.data, "base64url").toString("utf-8");
-  }
-  if (payload.parts) {
-    return extractText(payload.parts);
-  }
-
-  return res.data.snippet || "";
+  const text = extractTextFromPayload(payload);
+  return text || res.data.snippet || "";
 }
 
 export async function getThreadMessages(
   tokens: any,
   threadId: string,
-  maxMessages = 5
-): Promise<{ from: string; date: string; body: string }[]> {
+  maxMessages = 5,
+  userEmail?: string
+): Promise<{ messages: ThreadMessage[]; participants: ThreadParticipant[] }> {
   const gmail = getGmailClient(tokens);
   const startMs = Date.now();
   const thread = await gmail.users.threads.get({
@@ -653,39 +912,39 @@ export async function getThreadMessages(
   // Take the last N messages (most recent context)
   const recent = messages.slice(-maxMessages);
 
-  return recent.map((msg) => {
+  const recentMessages = recent.map((msg) => {
     const headers = msg.payload?.headers || [];
     const getHeader = (name: string) =>
       headers.find((h) => h.name === name)?.value || "";
 
-    function extractText(parts: any[]): string {
-      for (const part of parts) {
-        if (part.mimeType === "text/plain" && part.body?.data) {
-          return Buffer.from(part.body.data, "base64url").toString("utf-8");
-        }
-        if (part.parts) {
-          const text = extractText(part.parts);
-          if (text) return text;
-        }
-      }
-      return "";
-    }
-
-    let rawText = "";
-    if (msg.payload?.body?.data) {
-      rawText = Buffer.from(msg.payload.body.data, "base64url").toString("utf-8");
-    } else if (msg.payload?.parts) {
-      rawText = extractText(msg.payload.parts);
-    } else {
-      rawText = msg.snippet || "";
-    }
-
     return {
       from: getHeader("From"),
+      to: getHeader("To"),
+      cc: getHeader("Cc"),
       date: getHeader("Date"),
-      body: rawText,
+      subject: getHeader("Subject"),
+      replyTo: getHeader("Reply-To"),
+      messageId: getHeader("Message-ID"),
+      body: extractTextFromPayload(msg.payload) || msg.snippet || "",
     };
   });
+
+  const participants = dedupeAddresses(
+    recentMessages.flatMap((message) =>
+      [message.from, message.to, message.cc].flatMap((value) =>
+        parseAddressList(value)
+      )
+    ),
+    userEmail ? [userEmail] : []
+  ).map((participant) => ({
+    name: participant.name || participant.email,
+    email: participant.email,
+  }));
+
+  return {
+    messages: recentMessages,
+    participants,
+  };
 }
 
 export async function sendReply(
@@ -693,37 +952,52 @@ export async function sendReply(
   messageId: string,
   threadId: string,
   body: string,
-  userEmail: string
+  userEmail: string,
+  options?: {
+    mode?: "reply" | "replyAll";
+    replyTo?: string;
+    cc?: string[];
+    bcc?: string[];
+  }
 ): Promise<void> {
   const gmail = getGmailClient(tokens);
-
-  const original = await gmail.users.messages.get({
-    userId: "me",
-    id: messageId,
-    format: "metadata",
-    metadataHeaders: ["From", "Subject", "Message-ID"],
-  });
-
-  const headers = original.data.payload?.headers || [];
-  const getHeader = (name: string) =>
-    headers.find((h) => h.name === name)?.value || "";
-
-  const to = getHeader("From");
-  const subject = getHeader("Subject").startsWith("Re:")
-    ? getHeader("Subject")
-    : `Re: ${getHeader("Subject")}`;
-  const messageIdHeader = getHeader("Message-ID");
+  const original = await getMessageContext(tokens, messageId);
+  const excludedEmails = [userEmail];
+  const defaultReplyTarget = options?.replyTo || original.replyTo;
+  const subject = formatReplySubject(original.subject);
+  const baseCc =
+    options?.mode === "replyAll"
+      ? mergeAddressHeaders(
+          [original.to, original.cc],
+          [],
+          [
+            ...excludedEmails,
+            ...parseAddressList(defaultReplyTarget).map((address) => address.email),
+          ]
+        )
+      : "";
+  const cc = mergeAddressHeaders([baseCc], options?.cc || [], excludedEmails);
+  const bcc = mergeAddressHeaders([], options?.bcc || [], excludedEmails);
+  const references = buildReferencesHeader(
+    original.references,
+    original.messageId
+  );
   const bodyWithFooter = appendVoicemailFooter(body, userEmail);
-
-  const raw = [
-    `To: ${to}`,
-    `Subject: ${subject}`,
-    `In-Reply-To: ${messageIdHeader}`,
-    `References: ${messageIdHeader}`,
-    `Content-Type: text/plain; charset="UTF-8"`,
-    "",
-    bodyWithFooter,
-  ].join("\r\n");
+  const raw = buildRawMessage(
+    [
+      ["To", defaultReplyTarget],
+      ["Cc", cc],
+      ["Bcc", bcc],
+      ["Subject", subject],
+      ["In-Reply-To", original.messageId],
+      ["References", references],
+    ],
+    formatGmailReplyBody(bodyWithFooter, {
+      date: original.date,
+      from: original.from,
+      body: original.body,
+    })
+  );
 
   const encoded = Buffer.from(raw).toString("base64url");
 
@@ -737,8 +1011,51 @@ export async function sendReply(
     id: sendRes.data.id,
     threadId: sendRes.data.threadId,
     labelIds: sendRes.data.labelIds,
-    to,
+    to: defaultReplyTarget,
+    cc,
+    bcc,
     subject,
+  });
+}
+
+export async function forwardEmail(
+  tokens: any,
+  messageId: string,
+  to: string,
+  body: string,
+  userEmail: string,
+  options?: {
+    cc?: string[];
+    bcc?: string[];
+  }
+): Promise<void> {
+  const gmail = getGmailClient(tokens);
+  const original = await getMessageContext(tokens, messageId);
+  const subject = formatForwardSubject(original.subject);
+  const cc = mergeAddressHeaders([], options?.cc || [], [userEmail]);
+  const bcc = mergeAddressHeaders([], options?.bcc || [], [userEmail]);
+  const bodyWithFooter = appendVoicemailFooter(body, userEmail);
+  const raw = buildRawMessage(
+    [
+      ["To", to],
+      ["Cc", cc],
+      ["Bcc", bcc],
+      ["Subject", subject],
+    ],
+    formatGmailForwardBody(bodyWithFooter, {
+      from: original.from,
+      date: original.date,
+      subject: original.subject,
+      to: original.to,
+      cc: original.cc,
+      body: original.body,
+    })
+  );
+
+  const encoded = Buffer.from(raw).toString("base64url");
+  await gmail.users.messages.send({
+    userId: "me",
+    requestBody: { raw: encoded },
   });
 }
 
@@ -1070,18 +1387,25 @@ export async function sendNewEmail(
   to: string,
   subject: string,
   body: string,
-  userEmail: string
+  userEmail: string,
+  options?: {
+    cc?: string[];
+    bcc?: string[];
+  }
 ): Promise<void> {
   const gmail = getGmailClient(tokens);
   const bodyWithFooter = appendVoicemailFooter(body, userEmail);
-
-  const raw = [
-    `To: ${to}`,
-    `Subject: ${subject}`,
-    `Content-Type: text/plain; charset="UTF-8"`,
-    "",
-    bodyWithFooter,
-  ].join("\r\n");
+  const cc = mergeAddressHeaders([], options?.cc || [], [userEmail]);
+  const bcc = mergeAddressHeaders([], options?.bcc || [], [userEmail]);
+  const raw = buildRawMessage(
+    [
+      ["To", to],
+      ["Cc", cc],
+      ["Bcc", bcc],
+      ["Subject", subject],
+    ],
+    bodyWithFooter
+  );
 
   const encoded = Buffer.from(raw).toString("base64url");
 
@@ -1090,5 +1414,3 @@ export async function sendNewEmail(
     requestBody: { raw: encoded },
   });
 }
-
-

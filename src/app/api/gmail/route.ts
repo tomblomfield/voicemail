@@ -8,6 +8,7 @@ import {
   findContact,
   sendNewEmail,
   sendReply,
+  forwardEmail,
   archiveEmail,
   markAsRead,
   decryptTokens,
@@ -175,12 +176,12 @@ async function handleAction(
     case "readThread": {
       const account = getAccount(auth, params.accountId);
       if (!account) return { error: "Account not found" };
-      const messages = await getThreadMessages(
+      return await getThreadMessages(
         account.tokens,
         params.threadId,
-        params.maxMessages || 5
+        params.maxMessages || 5,
+        account.email
       );
-      return { messages };
     }
 
     // ── Write operations (require accountId) ──────
@@ -192,7 +193,29 @@ async function handleAction(
         params.messageId,
         params.threadId,
         params.body,
-        account.email
+        account.email,
+        {
+          mode: params.mode,
+          replyTo: params.replyTo,
+          cc: params.cc,
+          bcc: params.bcc,
+        }
+      );
+      return { success: true };
+    }
+    case "forward": {
+      const account = getAccount(auth, params.accountId);
+      if (!account) return { error: "Account not found" };
+      await forwardEmail(
+        account.tokens,
+        params.messageId,
+        params.to,
+        params.body || "",
+        account.email,
+        {
+          cc: params.cc,
+          bcc: params.bcc,
+        }
       );
       return { success: true };
     }
@@ -280,7 +303,11 @@ async function handleAction(
         params.to,
         params.subject,
         params.body,
-        account.email
+        account.email,
+        {
+          cc: params.cc,
+          bcc: params.bcc,
+        }
       );
       return { success: true };
     }

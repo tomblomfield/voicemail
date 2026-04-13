@@ -139,7 +139,8 @@ NEVER invent, guess, or assume any email content. You MUST call get_email_count 
 2. Only after the user explicitly asks to start, continue, open one, read one, or names a sender should you call get_next_email. Wait for the result before saying anything about the email. Once you have it, read a brief summary: who it's from, the subject, and a 1-2 sentence summary of the content. If threadLength > 1, the body contains the full conversation thread with multiple messages from different people — summarize the whole thread, not just the latest message. For example: "This is a thread with 3 messages. You replied to Harshita about ESTA requirements, and now Yasith is asking about visa specifics." If the user is in the CC or BCC (not in the "to" field), mention that — e.g., "You're CC'd on this one" — since CC'd emails are usually lower priority.
 3. After summarizing, ask: "Would you like to reply, skip, or archive this one?"
 4. Based on their response:
-   - **Reply**: Ask what they'd like to say. Draft the reply, read it back to them, and ask to confirm before sending. If they confirm, call reply_to_email. The email will be automatically archived after sending.
+   - **Reply**: If the email involves multiple other people, ask whether they want to reply all or just one person before drafting. If "just one person" is ambiguous, ask who. Then ask what they'd like to say, whether anyone should be cc'd or bcc'd, read the draft back, and ask to confirm before sending. If they confirm, call reply_to_email. The email will be automatically archived after sending.
+   - **Forward**: If the user wants to forward the email, ask who to forward it to, whether anyone should be cc'd or bcc'd, and whether they want to add a note on top. Read the full forward back at a high level, then confirm and call forward_email.
    - **Skip**: Call skip_email and move to the next one.
    - **Archive**: Call archive_email and move to the next one.
    - **Block**: If the user says "block this sender", "block them", or similar, confirm who they're blocking, then call block_sender. This creates a Gmail filter that sends all future emails from that sender to trash and archives the current email.
@@ -153,7 +154,7 @@ NEVER invent, guess, or assume any email content. You MUST call get_email_count 
 # Search & Compose
 - The user can ask to find old emails at any time (e.g., "Did Sarah send me that report?"). Use search_emails with Gmail search syntax.
 - The user can ask to send a new email (e.g., "Send an email to Denisa"). Use find_contact to resolve the name to an email address. If multiple matches, read the top 2-3 and ask which one. Then ask what they want to say, draft it, read it back, and confirm before sending with send_new_email.
-- Always confirm recipient, subject, and body before sending a new email.
+- Always confirm recipient, any cc or bcc recipients, subject, and body before sending a new email.
 
 # Calendar
 - If the user asks about their calendar, use list_calendar_events.
@@ -473,6 +474,7 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
           });
 
           const threadMessages = threadData.messages || [];
+          const participants = threadData.participants || [];
           let conversationContext = "";
           if (threadMessages.length > 1) {
             conversationContext = threadMessages
@@ -499,6 +501,9 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
             date: email.date,
             threadLength: threadMessages.length,
             body: conversationContext,
+            participants,
+            participantCount: participants.length,
+            hasMultiplePeople: participants.length > 1,
           };
 
           if (isMultiAccount) {
@@ -531,6 +536,27 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
               type: "string",
               description: "The text content of the reply",
             },
+            reply_mode: {
+              type: "string",
+              enum: ["reply", "replyAll"],
+              description:
+                "Use replyAll when the user wants everyone on the latest message included.",
+            },
+            reply_to: {
+              type: "string",
+              description:
+                "Optional explicit recipient for a single-person reply when the user names someone specific.",
+            },
+            cc: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional CC recipients as email addresses.",
+            },
+            bcc: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional BCC recipients as email addresses.",
+            },
           },
           required: ["message_id", "thread_id", "reply_text"],
           additionalProperties: false,
@@ -543,6 +569,10 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
             messageId: args.message_id,
             threadId: args.thread_id,
             body: args.reply_text,
+            mode: args.reply_mode || "reply",
+            replyTo: args.reply_to,
+            cc: args.cc || [],
+            bcc: args.bcc || [],
             accountId,
           });
           if (data.error) { debugLogClient("error", "reply_to_email: failed", data.error); return { error: data.error }; }
@@ -554,6 +584,62 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
           deps.recordAction("reply");
           debugLogClient("tool", "reply_to_email: success");
           return { success: true, message: "Reply sent and email archived." };
+        },
+      }),
+
+      tool({
+        name: "forward_email",
+        description:
+          "Forward the current email to one or more new recipients. Only call this after confirming the forward recipients, any cc or bcc recipients, and the optional note to add above the forwarded message.",
+        parameters: {
+          type: "object",
+          properties: {
+            message_id: {
+              type: "string",
+              description: "The ID of the email to forward",
+            },
+            to: {
+              type: "string",
+              description:
+                "Forward recipients as a comma-separated list of email addresses.",
+            },
+            note: {
+              type: "string",
+              description:
+                "Optional note to place above the forwarded message. Use an empty string if there is no note.",
+            },
+            cc: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional CC recipients as email addresses.",
+            },
+            bcc: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional BCC recipients as email addresses.",
+            },
+          },
+          required: ["message_id", "to"],
+          additionalProperties: false,
+        },
+        execute: async (args: any) => {
+          debugLogClient("tool", "forward_email: executing", args);
+          const accountId = getAccountIdForEmail(args.message_id);
+          const data = await gmailApi({
+            action: "forward",
+            messageId: args.message_id,
+            to: args.to,
+            body: args.note || "",
+            cc: args.cc || [],
+            bcc: args.bcc || [],
+            accountId,
+          });
+          if (data.error) {
+            debugLogClient("error", "forward_email: failed", data.error);
+            return { error: data.error };
+          }
+          debugLogClient("tool", "forward_email: success");
+          return { success: true, message: "Email forwarded." };
         },
       }),
 
@@ -799,6 +885,16 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
               type: "string",
               description: "Email body text",
             },
+            cc: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional CC recipients as email addresses.",
+            },
+            bcc: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional BCC recipients as email addresses.",
+            },
             ...(isMultiAccount
               ? {
                   account_id: {
@@ -819,6 +915,8 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
             to: args.to,
             subject: args.subject,
             body: args.body,
+            cc: args.cc || [],
+            bcc: args.bcc || [],
             accountId: args.account_id,
           });
           if (data.error) { debugLogClient("error", "send_new_email: failed", data.error); return { error: data.error }; }

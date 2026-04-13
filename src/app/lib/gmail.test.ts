@@ -4,9 +4,14 @@ import {
   buildArchiveFilterCriteria,
   buildSearchQueryFromCriteria,
   describeFilter,
+  formatForwardSubject,
+  formatGmailForwardBody,
+  formatGmailReplyBody,
+  formatReplySubject,
   getMissingScopes,
   GMAIL_FILTER_WRITE_SCOPE,
   normalizeSubjectForFilter,
+  parseAddressList,
   shouldAddVoicemailFooter,
   truncateToLatestMessage,
 } from "./gmail";
@@ -220,3 +225,55 @@ describe("voicemail footer", () => {
   });
 });
 
+describe("reply and forward formatting", () => {
+  it("formats Gmail-style reply bodies with a quoted original", () => {
+    expect(
+      formatGmailReplyBody("Thanks for the update.", {
+        date: "Mon, 6 Apr 2026 09:00:00 -0700",
+        from: "Alice Example <alice@example.com>",
+        body: "Line one\n\nLine two",
+      })
+    ).toBe(
+      "Thanks for the update.\r\n\r\nOn Mon, Apr 6, 2026 at 9:00 AM, Alice Example <alice@example.com> wrote:\r\n> Line one\r\n>\r\n> Line two"
+    );
+  });
+
+  it("formats Gmail-style forward bodies with a forwarded-message header block", () => {
+    expect(
+      formatGmailForwardBody("FYI", {
+        from: "Alice Example <alice@example.com>",
+        date: "Mon, 6 Apr 2026 09:00:00 -0700",
+        subject: "Quarterly update",
+        to: "me@example.com",
+        cc: "Bob Example <bob@example.com>",
+        body: "Original content",
+      })
+    ).toBe(
+      "FYI\r\n\r\n---------- Forwarded message ---------\r\nFrom: Alice Example <alice@example.com>\r\nDate: Mon, 6 Apr 2026 09:00:00 -0700\r\nSubject: Quarterly update\r\nTo: me@example.com\r\nCc: Bob Example <bob@example.com>\r\n\r\nOriginal content"
+    );
+  });
+
+  it("adds missing Re: and Fwd: prefixes without duplicating them", () => {
+    expect(formatReplySubject("Quarterly update")).toBe("Re: Quarterly update");
+    expect(formatReplySubject("Re: Quarterly update")).toBe(
+      "Re: Quarterly update"
+    );
+    expect(formatForwardSubject("Quarterly update")).toBe(
+      "Fwd: Quarterly update"
+    );
+    expect(formatForwardSubject("FW: Quarterly update")).toBe(
+      "FW: Quarterly update"
+    );
+  });
+
+  it("parses address lists with quoted commas correctly", () => {
+    expect(
+      parseAddressList(
+        '"Doe, Jane" <jane@example.com>, John Smith <john@example.com>'
+      )
+    ).toEqual([
+      { name: "Doe, Jane", email: "jane@example.com" },
+      { name: "John Smith", email: "john@example.com" },
+    ]);
+  });
+});
