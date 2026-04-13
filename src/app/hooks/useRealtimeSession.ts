@@ -10,6 +10,9 @@ import { useEvent } from '../contexts/EventContext';
 import { useHandleSessionHistory } from './useHandleSessionHistory';
 import { SessionStatus } from '../types';
 import { debugLogClient } from '../lib/debugLog';
+import { logClientLatencyTelemetry } from '../lib/telemetry';
+
+const REALTIME_MODEL = 'gpt-realtime-1.5';
 
 export interface RealtimeSessionCallbacks {
   onConnectionChange?: (status: SessionStatus) => void;
@@ -43,14 +46,57 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
   const { logServerEvent } = useEvent();
 
   const historyHandlers = useHandleSessionHistory().current;
+  const lastUserTranscriptAtRef = useRef<number | null>(null);
+  const responseStartedAtRef = useRef<Map<string, number>>(new Map());
+  const firstOutputLoggedRef = useRef<Set<string>>(new Set());
+
+  function getResponseId(event: any): string {
+    return event.response?.id || event.response_id || "unknown";
+  }
+
+  function logFirstRealtimeOutput(event: any, outputType: string) {
+    const responseId = getResponseId(event);
+    if (firstOutputLoggedRef.current.has(responseId)) return;
+
+    const startedAt = responseStartedAtRef.current.get(responseId);
+    if (startedAt === undefined) return;
+
+    firstOutputLoggedRef.current.add(responseId);
+    const now = performance.now();
+    logClientLatencyTelemetry({
+      provider: "openai",
+      operation: "realtime.first_output",
+      durationMs: now - startedAt,
+      status: "ok",
+      model: REALTIME_MODEL,
+      metrics: {
+        outputType,
+        sinceUserTranscriptMs:
+          lastUserTranscriptAtRef.current === null
+            ? undefined
+            : now - lastUserTranscriptAtRef.current,
+      },
+    });
+  }
 
   function handleTransportEvent(event: any) {
     debugLogClient("event", `transport_event: ${event.type}`, event.type === "response.audio_transcript.delta" ? { delta: event.delta?.slice?.(0, 50) } : event);
     // Handle additional server events that aren't managed by the session
     switch (event.type) {
       case "conversation.item.input_audio_transcription.completed": {
+        lastUserTranscriptAtRef.current = performance.now();
         debugLogClient("event", "USER SAID:", event.transcript);
         historyHandlers.handleTranscriptionCompleted(event);
+        break;
+      }
+      case "response.created": {
+        responseStartedAtRef.current.set(getResponseId(event), performance.now());
+        logServerEvent(event);
+        break;
+      }
+      case "response.audio.delta": {
+        logFirstRealtimeOutput(event, "audio");
+        logServerEvent(event);
         break;
       }
       case "response.audio_transcript.done": {
@@ -59,7 +105,25 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
         break;
       }
       case "response.audio_transcript.delta": {
+        logFirstRealtimeOutput(event, "transcript");
         historyHandlers.handleTranscriptionDelta(event);
+        break;
+      }
+      case "response.done": {
+        const responseId = getResponseId(event);
+        const startedAt = responseStartedAtRef.current.get(responseId);
+        if (startedAt !== undefined) {
+          logClientLatencyTelemetry({
+            provider: "openai",
+            operation: "realtime.response.done",
+            durationMs: performance.now() - startedAt,
+            status: "ok",
+            model: REALTIME_MODEL,
+          });
+          responseStartedAtRef.current.delete(responseId);
+          firstOutputLoggedRef.current.delete(responseId);
+        }
+        logServerEvent(event);
         break;
       }
       default: {
@@ -152,7 +216,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
             return pc;
           },
         }),
-        model: 'gpt-realtime-1.5',
+        model: REALTIME_MODEL,
         config: {
           turn_detection: {
             type: 'server_vad',
@@ -168,8 +232,28 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
         context: extraContext ?? {},
       });
 
-      debugLogClient("event", "Connecting to OpenAI realtime...", { model: 'gpt-realtime-1.5' });
-      await sessionRef.current.connect({ apiKey: ek });
+      debugLogClient("event", "Connecting to OpenAI realtime...", { model: REALTIME_MODEL });
+      const connectStartMs = performance.now();
+      try {
+        await sessionRef.current.connect({ apiKey: ek });
+        logClientLatencyTelemetry({
+          provider: "openai",
+          operation: "realtime.connect",
+          durationMs: performance.now() - connectStartMs,
+          status: "ok",
+          model: REALTIME_MODEL,
+        });
+      } catch (error) {
+        logClientLatencyTelemetry({
+          provider: "openai",
+          operation: "realtime.connect",
+          durationMs: performance.now() - connectStartMs,
+          status: "error",
+          model: REALTIME_MODEL,
+          errorType: error instanceof Error ? error.name : "Error",
+        });
+        throw error;
+      }
       debugLogClient("event", "Connected to OpenAI realtime ✓");
       updateStatus('CONNECTED');
     },

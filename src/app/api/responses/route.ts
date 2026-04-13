@@ -4,6 +4,7 @@ import { decryptTokens, hasRequiredGoogleScopes } from "@/app/lib/gmail";
 import { debugLog, debugLogVerbose } from "@/app/lib/debugLog";
 import { SESSION_COOKIE_NAME, getSessionUserId } from "@/app/lib/session";
 import { getGoogleAccounts } from "@/app/lib/db";
+import { logLatencyTelemetry } from "@/app/lib/telemetry";
 
 async function isAuthenticated(req: NextRequest): Promise<boolean> {
   const sessionCookie = req.cookies.get(SESSION_COOKIE_NAME);
@@ -64,6 +65,16 @@ async function structuredResponse(openai: OpenAI, body: any) {
       id: response.id,
       usage: (response as any).usage,
     });
+    logLatencyTelemetry({
+      provider: "openai",
+      operation: "responses.parse",
+      durationMs: Date.now() - startMs,
+      status: "ok",
+      route: "/api/responses",
+      httpStatus: 200,
+      model: body.model,
+      metrics: usageMetrics((response as any).usage),
+    });
     debugLogVerbose("llm", "Structured response FULL LLM RESPONSE", {
       id: response.id,
       model: (response as any).model,
@@ -73,6 +84,16 @@ async function structuredResponse(openai: OpenAI, body: any) {
 
     return NextResponse.json(response);
   } catch (err: any) {
+    logLatencyTelemetry({
+      provider: "openai",
+      operation: "responses.parse",
+      durationMs: Date.now() - startMs,
+      status: "error",
+      route: "/api/responses",
+      httpStatus: err.status || 500,
+      model: body.model,
+      errorType: err.name || "Error",
+    });
     debugLog("error", `Structured response FAILED [${Date.now() - startMs}ms]`, { message: err.message, status: err.status });
     console.error('responses proxy error', err);
     return NextResponse.json({ error: 'failed' }, { status: 500 });
@@ -90,6 +111,16 @@ async function textResponse(openai: OpenAI, body: any) {
       id: response.id,
       usage: (response as any).usage,
     });
+    logLatencyTelemetry({
+      provider: "openai",
+      operation: "responses.create",
+      durationMs: Date.now() - startMs,
+      status: "ok",
+      route: "/api/responses",
+      httpStatus: 200,
+      model: body.model,
+      metrics: usageMetrics((response as any).usage),
+    });
     debugLogVerbose("llm", "Text response FULL LLM RESPONSE", {
       id: response.id,
       model: (response as any).model,
@@ -99,8 +130,26 @@ async function textResponse(openai: OpenAI, body: any) {
 
     return NextResponse.json(response);
   } catch (err: any) {
+    logLatencyTelemetry({
+      provider: "openai",
+      operation: "responses.create",
+      durationMs: Date.now() - startMs,
+      status: "error",
+      route: "/api/responses",
+      httpStatus: err.status || 500,
+      model: body.model,
+      errorType: err.name || "Error",
+    });
     debugLog("error", `Text response FAILED [${Date.now() - startMs}ms]`, { message: err.message, status: err.status });
     console.error('responses proxy error', err);
     return NextResponse.json({ error: 'failed' }, { status: 500 });
   }
+}
+
+function usageMetrics(usage: any) {
+  return {
+    inputTokens: usage?.input_tokens,
+    outputTokens: usage?.output_tokens,
+    totalTokens: usage?.total_tokens,
+  };
 }

@@ -27,6 +27,7 @@ import {
   listCalendarEvents,
 } from "@/app/lib/calendar-api";
 import { debugLog } from "@/app/lib/debugLog";
+import { logLatencyTelemetry } from "@/app/lib/telemetry";
 import {
   getGoogleAccounts,
   getUserById,
@@ -472,9 +473,46 @@ async function handleAction(
 // Route handler
 // ────────────────────────────────────────────
 
+export function gmailTelemetryMetrics(
+  action: string,
+  params: any,
+  result: any,
+  accountCount: number
+) {
+  const metrics: Record<string, string | number | boolean | null | undefined> = {
+    accountCount,
+    accountScope: params.accountId ? "single" : "multi",
+  };
+
+  if (typeof params.maxResults === "number") metrics.maxResults = params.maxResults;
+  if (Array.isArray(result?.emails)) metrics.emailCount = result.emails.length;
+  if (Array.isArray(result?.messages)) metrics.messageCount = result.messages.length;
+  if (Array.isArray(result?.contacts)) metrics.contactCount = result.contacts.length;
+  if (Array.isArray(result?.filters)) metrics.filterCount = result.filters.length;
+  if (Array.isArray(result?.events)) metrics.eventCount = result.events.length;
+  if (Array.isArray(result?.accounts)) metrics.returnedAccountCount = result.accounts.length;
+  if (typeof result?.success === "boolean") metrics.success = result.success;
+  if (typeof result?.archivedCount === "number") metrics.archivedCount = result.archivedCount;
+  if (typeof result?.matchingInboxCount === "number") {
+    metrics.matchingInboxCount = result.matchingInboxCount;
+  }
+  if (action === "read" && typeof result?.body === "string") metrics.bodyReturned = true;
+
+  return metrics;
+}
+
 export async function POST(request: NextRequest) {
+  const routeStartMs = Date.now();
   const auth = await resolveAuth(request);
   if (!auth) {
+    logLatencyTelemetry({
+      provider: "gmail",
+      operation: "auth",
+      durationMs: Date.now() - routeStartMs,
+      status: "unauthorized",
+      route: "/api/gmail",
+      httpStatus: 401,
+    });
     debugLog("api", "POST /api/gmail — UNAUTHORIZED (no valid auth)");
     return NextResponse.json(
       {
@@ -494,6 +532,15 @@ export async function POST(request: NextRequest) {
     const elapsed = Date.now() - startMs;
 
     if (result === null) {
+      logLatencyTelemetry({
+        provider: "gmail",
+        operation: action,
+        durationMs: elapsed,
+        status: "error",
+        route: "/api/gmail",
+        httpStatus: 400,
+        metrics: { accountCount: auth.accounts.length },
+      });
       debugLog("error", `Unknown action: ${action}`);
       return NextResponse.json(
         { error: `Unknown action: ${action}` },
@@ -506,10 +553,29 @@ export async function POST(request: NextRequest) {
       `POST /api/gmail — action=${action} DONE [${elapsed}ms]`,
       result
     );
+    logLatencyTelemetry({
+      provider: "gmail",
+      operation: action,
+      durationMs: elapsed,
+      status: "ok",
+      route: "/api/gmail",
+      httpStatus: 200,
+      metrics: gmailTelemetryMetrics(action, params, result, auth.accounts.length),
+    });
     return NextResponse.json(result);
   } catch (error: any) {
     const elapsed = Date.now() - startMs;
     if (error instanceof GmailScopeError) {
+      logLatencyTelemetry({
+        provider: "gmail",
+        operation: action,
+        durationMs: elapsed,
+        status: "error",
+        route: "/api/gmail",
+        httpStatus: 403,
+        errorType: error.name,
+        metrics: { accountCount: auth.accounts.length },
+      });
       debugLog("error", `Gmail scope error (${action}) [${elapsed}ms]`, {
         missingScopes: error.missingScopes,
       });
@@ -522,6 +588,16 @@ export async function POST(request: NextRequest) {
         { status: 403 }
       );
     }
+    logLatencyTelemetry({
+      provider: "gmail",
+      operation: action,
+      durationMs: elapsed,
+      status: "error",
+      route: "/api/gmail",
+      httpStatus: 500,
+      errorType: error.name || "Error",
+      metrics: { accountCount: auth.accounts.length },
+    });
     debugLog("error", `Google API error (${action}) [${elapsed}ms]`, {
       message: error.message,
       stack: error.stack,

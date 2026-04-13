@@ -14,6 +14,9 @@ import {
   SESSION_COOKIE_NAME,
   getSessionUserId,
 } from "@/app/lib/session";
+import { logLatencyTelemetry } from "@/app/lib/telemetry";
+
+const REALTIME_MODEL = "gpt-realtime-1.5";
 
 export async function GET(request: NextRequest) {
   const sessionCookie = request.cookies.get(SESSION_COOKIE_NAME);
@@ -46,6 +49,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  let openaiStartMs: number | null = null;
   try {
     console.log(
       `session_started: ${userEmail} accounts=${accountCount}`
@@ -56,6 +60,7 @@ export async function GET(request: NextRequest) {
     }
 
     debugLog("api", "Creating OpenAI realtime session...");
+    openaiStartMs = Date.now();
     const response = await fetch(
       "https://api.openai.com/v1/realtime/sessions",
       {
@@ -65,11 +70,21 @@ export async function GET(request: NextRequest) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "gpt-realtime-1.5",
+          model: REALTIME_MODEL,
         }),
       }
     );
     const data = await response.json();
+    logLatencyTelemetry({
+      provider: "openai",
+      operation: "realtime.sessions.create",
+      durationMs: Date.now() - openaiStartMs,
+      status: response.ok ? "ok" : "error",
+      route: "/api/session",
+      httpStatus: response.status,
+      model: REALTIME_MODEL,
+      metrics: { accountCount },
+    });
     debugLog("api", "OpenAI realtime session created", {
       id: data.id,
       model: data.model,
@@ -82,6 +97,15 @@ export async function GET(request: NextRequest) {
       accountCount,
     });
   } catch (error) {
+    logLatencyTelemetry({
+      provider: "openai",
+      operation: "realtime.sessions.create",
+      durationMs: openaiStartMs === null ? 0 : Date.now() - openaiStartMs,
+      status: "error",
+      route: "/api/session",
+      model: REALTIME_MODEL,
+      errorType: error instanceof Error ? error.name : "Error",
+    });
     console.error("Error in /session:", error);
     return NextResponse.json(
       { error: "Internal Server Error" },
