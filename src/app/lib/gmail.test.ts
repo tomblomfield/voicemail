@@ -1,9 +1,30 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const gmailMock = vi.hoisted(() => ({
+  users: {
+    messages: {
+      get: vi.fn(),
+      send: vi.fn(),
+      attachments: {
+        get: vi.fn(),
+      },
+    },
+  },
+}));
+
+vi.mock("@/app/lib/google-auth", () => ({
+  getGmailClient: () => gmailMock,
+  getOAuth2Client: vi.fn(),
+}));
+
 import {
   appendVoicemailFooter,
   buildArchiveFilterCriteria,
+  buildRawMultipartMessage,
   buildSearchQueryFromCriteria,
+  collectAttachmentParts,
   describeFilter,
+  forwardEmail,
   formatForwardSubject,
   formatGmailForwardBody,
   formatGmailReplyBody,
@@ -12,6 +33,7 @@ import {
   GMAIL_FILTER_WRITE_SCOPE,
   normalizeSubjectForFilter,
   parseAddressList,
+  sendReply,
   shouldAddVoicemailFooter,
   truncateToLatestMessage,
 } from "./gmail";
@@ -24,6 +46,27 @@ const FOOTER_ENV_KEYS = [
 
 let originalFooterEnv: Record<string, string | undefined>;
 
+function gmailPayload(parts: any[]) {
+  return {
+    mimeType: "multipart/mixed",
+    headers: [
+      { name: "From", value: "Alice Example <alice@example.com>" },
+      { name: "To", value: "Me <me@example.com>" },
+      { name: "Cc", value: "Bob Example <bob@example.com>" },
+      { name: "Subject", value: "Quarterly update" },
+      { name: "Date", value: "Mon, 6 Apr 2026 09:00:00 -0700" },
+      { name: "Message-ID", value: "<message-1@example.com>" },
+    ],
+    parts,
+  };
+}
+
+function decodeSentRaw(): string {
+  const requestBody = gmailMock.users.messages.send.mock.calls[0][0]
+    .requestBody;
+  return Buffer.from(requestBody.raw, "base64url").toString("utf-8");
+}
+
 beforeEach(() => {
   originalFooterEnv = Object.fromEntries(
     FOOTER_ENV_KEYS.map((key) => [key, process.env[key]])
@@ -32,6 +75,10 @@ beforeEach(() => {
   for (const key of FOOTER_ENV_KEYS) {
     delete process.env[key];
   }
+
+  gmailMock.users.messages.get.mockReset();
+  gmailMock.users.messages.send.mockReset();
+  gmailMock.users.messages.attachments.get.mockReset();
 });
 
 afterEach(() => {
@@ -275,5 +322,270 @@ describe("reply and forward formatting", () => {
       { name: "Doe, Jane", email: "jane@example.com" },
       { name: "John Smith", email: "john@example.com" },
     ]);
+  });
+
+  it("collects file attachments from nested Gmail payload parts", () => {
+    expect(
+      collectAttachmentParts({
+        mimeType: "multipart/mixed",
+        parts: [
+          {
+            mimeType: "multipart/alternative",
+            parts: [
+              {
+                mimeType: "text/plain",
+                body: {
+                  data: Buffer.from("hello").toString("base64url"),
+                },
+              },
+            ],
+          },
+          {
+            filename: "quarterly plan.pdf",
+            mimeType: "application/pdf",
+            headers: [
+              {
+                name: "Content-Disposition",
+                value: 'attachment; filename="quarterly plan.pdf"',
+              },
+            ],
+            body: {
+              attachmentId: "att-1",
+              size: 1234,
+            },
+          },
+          {
+            filename: "inline-logo.png",
+            mimeType: "image/png",
+            headers: [
+              {
+                name: "Content-Disposition",
+                value: 'inline; filename="inline-logo.png"',
+              },
+            ],
+            body: {
+              attachmentId: "att-2",
+              size: 55,
+            },
+          },
+        ],
+      })
+    ).toEqual([
+      {
+        filename: "quarterly plan.pdf",
+        mimeType: "application/pdf",
+        attachmentId: "att-1",
+        data: undefined,
+        size: 1234,
+        contentDisposition: 'attachment; filename="quarterly plan.pdf"',
+        contentId: "",
+      },
+    ]);
+  });
+
+  it("collects attachment content that is already embedded in the payload", () => {
+    expect(
+      collectAttachmentParts({
+        filename: "notes.txt",
+        mimeType: "text/plain",
+        headers: [
+          {
+            name: "Content-Disposition",
+            value: 'attachment; filename="notes.txt"',
+          },
+        ],
+        body: {
+          data: Buffer.from("meeting notes").toString("base64url"),
+          size: 13,
+        },
+      })
+    ).toEqual([
+      {
+        filename: "notes.txt",
+        mimeType: "text/plain",
+        attachmentId: undefined,
+        data: Buffer.from("meeting notes").toString("base64url"),
+        size: 13,
+        contentDisposition: 'attachment; filename="notes.txt"',
+        contentId: "",
+      },
+    ]);
+  });
+
+  it("builds multipart forward messages with attachments", () => {
+    const raw = buildRawMultipartMessage(
+      [
+        ["To", "team@example.com"],
+        ["Subject", "Fwd: Quarterly update"],
+      ],
+      "FYI\r\n\r\n---------- Forwarded message ---------\r\nOriginal",
+      [
+        {
+          filename: "quarterly plan.pdf",
+          mimeType: "application/pdf",
+          content: Buffer.from("pdf-bytes"),
+          contentDisposition: 'attachment; filename="quarterly plan.pdf"',
+        },
+      ],
+      "test_boundary"
+    );
+
+    expect(raw).toContain(
+      'Content-Type: multipart/mixed; boundary="test_boundary"'
+    );
+    expect(raw).toContain("To: team@example.com");
+    expect(raw).toContain("Subject: Fwd: Quarterly update");
+    expect(raw).toContain("--test_boundary");
+    expect(raw).toContain(
+      'Content-Type: application/pdf; name="quarterly plan.pdf"'
+    );
+    expect(raw).toContain(
+      'Content-Disposition: attachment; filename="quarterly plan.pdf"'
+    );
+    expect(raw).toContain(Buffer.from("pdf-bytes").toString("base64"));
+    expect(raw).toContain("--test_boundary--");
+  });
+
+  it("rejects multipart messages above the configured size limit", () => {
+    expect(() =>
+      buildRawMultipartMessage(
+        [["To", "team@example.com"]],
+        "FYI",
+        [
+          {
+            filename: "small.txt",
+            mimeType: "text/plain",
+            content: Buffer.from("small"),
+          },
+        ],
+        "test_boundary",
+        100
+      )
+    ).toThrow("exceeds Gmail size limits");
+  });
+
+  it("forwards multiple original file attachments", async () => {
+    gmailMock.users.messages.get.mockResolvedValueOnce({
+      data: {
+        threadId: "thread-1",
+        snippet: "Original snippet",
+        payload: gmailPayload([
+          {
+            mimeType: "text/plain",
+            body: {
+              data: Buffer.from("Original body").toString("base64url"),
+            },
+          },
+          {
+            filename: "quarterly plan.pdf",
+            mimeType: "application/pdf",
+            headers: [
+              {
+                name: "Content-Disposition",
+                value: 'attachment; filename="quarterly plan.pdf"',
+              },
+            ],
+            body: {
+              attachmentId: "att-1",
+              size: 9,
+            },
+          },
+          {
+            filename: "notes.txt",
+            mimeType: "text/plain",
+            headers: [
+              {
+                name: "Content-Disposition",
+                value: 'attachment; filename="notes.txt"',
+              },
+            ],
+            body: {
+              data: Buffer.from("meeting notes").toString("base64url"),
+              size: 13,
+            },
+          },
+        ]),
+      },
+    });
+    gmailMock.users.messages.attachments.get.mockResolvedValueOnce({
+      data: {
+        data: Buffer.from("pdf-bytes").toString("base64url"),
+      },
+    });
+    gmailMock.users.messages.send.mockResolvedValueOnce({
+      data: { id: "sent-1" },
+    });
+
+    await forwardEmail(
+      {},
+      "msg-1",
+      "team@example.com",
+      "FYI",
+      "me@example.com"
+    );
+
+    expect(gmailMock.users.messages.attachments.get).toHaveBeenCalledWith({
+      userId: "me",
+      messageId: "msg-1",
+      id: "att-1",
+    });
+    const raw = decodeSentRaw();
+    expect(raw).toContain("Content-Type: multipart/mixed");
+    expect(raw).toContain("To: team@example.com");
+    expect(raw).toContain("Subject: Fwd: Quarterly update");
+    expect(raw).toContain(
+      'Content-Disposition: attachment; filename="quarterly plan.pdf"'
+    );
+    expect(raw).toContain('Content-Disposition: attachment; filename="notes.txt"');
+    expect(raw).toContain(Buffer.from("pdf-bytes").toString("base64"));
+    expect(raw).toContain(Buffer.from("meeting notes").toString("base64"));
+  });
+
+  it("does not fetch or include attachments when replying", async () => {
+    gmailMock.users.messages.get.mockResolvedValueOnce({
+      data: {
+        threadId: "thread-1",
+        snippet: "Original snippet",
+        payload: gmailPayload([
+          {
+            mimeType: "text/plain",
+            body: {
+              data: Buffer.from("Original body").toString("base64url"),
+            },
+          },
+          {
+            filename: "quarterly plan.pdf",
+            mimeType: "application/pdf",
+            headers: [
+              {
+                name: "Content-Disposition",
+                value: 'attachment; filename="quarterly plan.pdf"',
+              },
+            ],
+            body: {
+              attachmentId: "att-1",
+              size: 9,
+            },
+          },
+        ]),
+      },
+    });
+    gmailMock.users.messages.send.mockResolvedValueOnce({
+      data: { id: "sent-1", threadId: "thread-1", labelIds: [] },
+    });
+
+    await sendReply(
+      {},
+      "msg-1",
+      "thread-1",
+      "Thanks",
+      "me@example.com"
+    );
+
+    expect(gmailMock.users.messages.attachments.get).not.toHaveBeenCalled();
+    const raw = decodeSentRaw();
+    expect(raw).toContain('Content-Type: text/plain; charset="UTF-8"');
+    expect(raw).not.toContain("multipart/mixed");
+    expect(raw).not.toContain("quarterly plan.pdf");
   });
 });

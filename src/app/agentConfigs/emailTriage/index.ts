@@ -140,7 +140,7 @@ NEVER invent, guess, or assume any email content. You MUST call get_email_count 
 3. After summarizing, ask: "Would you like to reply, skip, or archive this one?"
 4. Based on their response:
    - **Reply**: If the email involves multiple other people, ask whether they want to reply all or just one person before drafting. If "just one person" is ambiguous, ask who. Then ask what they'd like to say, whether anyone should be cc'd or bcc'd, read the draft back, and ask to confirm before sending. If they confirm, call reply_to_email. The email will be automatically archived after sending.
-   - **Forward**: If the user wants to forward the email, ask who to forward it to, whether anyone should be cc'd or bcc'd, and whether they want to add a note on top. Read the full forward back at a high level, then confirm and call forward_email.
+   - **Forward**: If the user wants to forward the email, ask who to forward it to, whether anyone should be cc'd or bcc'd, and whether they want to add a note on top. Original file attachments are included automatically when forwarding. Read the full forward back at a high level, then confirm and call forward_email.
    - **Skip**: Call skip_email and move to the next one.
    - **Archive**: Call archive_email and move to the next one.
    - **Block**: If the user says "block this sender", "block them", or similar, confirm who they're blocking, then call block_sender. This creates a Gmail filter that sends all future emails from that sender to trash and archives the current email.
@@ -590,7 +590,7 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
       tool({
         name: "forward_email",
         description:
-          "Forward the current email to one or more new recipients. Only call this after confirming the forward recipients, any cc or bcc recipients, and the optional note to add above the forwarded message.",
+          "Forward the current email to one or more new recipients. Original file attachments are included automatically. Only call this after confirming the forward recipients, any cc or bcc recipients, and the optional note to add above the forwarded message.",
         parameters: {
           type: "object",
           properties: {

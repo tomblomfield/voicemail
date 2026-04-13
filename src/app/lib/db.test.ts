@@ -11,37 +11,42 @@ import {
 import { Pool } from "pg";
 
 const TEST_EMAIL = `test-${Date.now()}@example.com`;
+const dbIt = process.env.DATABASE_URL ? it : it.skip;
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 2,
-});
+const pool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 2,
+    })
+  : null;
 
 beforeAll(async () => {
+  if (!pool) return;
   await initDb();
 });
 
 afterAll(async () => {
+  if (!pool) return;
   // Clean up test data
   await pool.query(`DELETE FROM users WHERE email = $1`, [TEST_EMAIL]);
   await pool.end();
 });
 
 describe("upsertUser", () => {
-  it("creates a new user", async () => {
+  dbIt("creates a new user", async () => {
     const user = await upsertUser(TEST_EMAIL);
     expect(user).not.toBeNull();
     expect(user!.email).toBe(TEST_EMAIL);
     expect(user!.id).toBeTruthy();
   });
 
-  it("returns the same user on repeat call", async () => {
+  dbIt("returns the same user on repeat call", async () => {
     const user = await upsertUser(TEST_EMAIL);
     expect(user).not.toBeNull();
     expect(user!.email).toBe(TEST_EMAIL);
   });
 
-  it("normalizes email to lowercase", async () => {
+  dbIt("normalizes email to lowercase", async () => {
     const user = await upsertUser(TEST_EMAIL.toUpperCase());
     expect(user).not.toBeNull();
     expect(user!.email).toBe(TEST_EMAIL);
@@ -49,7 +54,7 @@ describe("upsertUser", () => {
 });
 
 describe("getUserByEmail", () => {
-  it("returns the user with all profile fields", async () => {
+  dbIt("returns the user with all profile fields", async () => {
     const user = await getUserByEmail(TEST_EMAIL);
     expect(user).not.toBeNull();
     expect(user!.email).toBe(TEST_EMAIL);
@@ -59,20 +64,20 @@ describe("getUserByEmail", () => {
     expect(user!.conference_link).toBeNull();
   });
 
-  it("returns null for unknown email", async () => {
+  dbIt("returns null for unknown email", async () => {
     const user = await getUserByEmail("nonexistent@example.com");
     expect(user).toBeNull();
   });
 });
 
 describe("updateUserProfile", () => {
-  it("updates a single field", async () => {
+  dbIt("updates a single field", async () => {
     await updateUserProfile(TEST_EMAIL, { homeAddress: "123 Main St" });
     const user = await getUserByEmail(TEST_EMAIL);
     expect(user.home_address).toBe("123 Main St");
   });
 
-  it("updates multiple fields at once", async () => {
+  dbIt("updates multiple fields at once", async () => {
     await updateUserProfile(TEST_EMAIL, {
       workAddress: "456 Office Blvd",
       phoneNumber: "+1-555-0100",
@@ -86,7 +91,7 @@ describe("updateUserProfile", () => {
     expect(user.home_address).toBe("123 Main St");
   });
 
-  it("can clear a field by setting null", async () => {
+  dbIt("can clear a field by setting null", async () => {
     await updateUserProfile(TEST_EMAIL, { homeAddress: null });
     const user = await getUserByEmail(TEST_EMAIL);
     expect(user.home_address).toBeNull();
@@ -94,18 +99,18 @@ describe("updateUserProfile", () => {
 });
 
 describe("memories", () => {
-  it("returns null when no memories exist", async () => {
+  dbIt("returns null when no memories exist", async () => {
     const memories = await getUserMemories(TEST_EMAIL);
     expect(memories).toBeNull();
   });
 
-  it("saves and retrieves memories", async () => {
+  dbIt("saves and retrieves memories", async () => {
     await saveUserMemories(TEST_EMAIL, "# Notes\n- Likes coffee");
     const memories = await getUserMemories(TEST_EMAIL);
     expect(memories).toBe("# Notes\n- Likes coffee");
   });
 
-  it("overwrites memories on second save", async () => {
+  dbIt("overwrites memories on second save", async () => {
     await saveUserMemories(TEST_EMAIL, "# Notes\n- Likes coffee\n- Has a dog named Max");
     const memories = await getUserMemories(TEST_EMAIL);
     expect(memories).toBe("# Notes\n- Likes coffee\n- Has a dog named Max");
@@ -113,7 +118,7 @@ describe("memories", () => {
 });
 
 describe("getAllUsers", () => {
-  it("returns a list including the test user", async () => {
+  dbIt("returns a list including the test user", async () => {
     const users = await getAllUsers();
     expect(users.length).toBeGreaterThan(0);
     const testUser = users.find((u) => u.email === TEST_EMAIL);

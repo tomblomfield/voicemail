@@ -191,6 +191,26 @@ export interface ThreadMessage {
   body: string;
 }
 
+export interface GmailAttachmentPart {
+  filename: string;
+  mimeType: string;
+  attachmentId?: string;
+  data?: string;
+  size: number;
+  contentDisposition: string;
+  contentId: string;
+}
+
+export interface OutboundAttachment {
+  filename: string;
+  mimeType: string;
+  content: Buffer;
+  contentDisposition?: string;
+  contentId?: string;
+}
+
+const MAX_GMAIL_RAW_MESSAGE_BYTES = 25 * 1024 * 1024;
+
 function splitAddressHeader(value: string): string[] {
   const entries: string[] = [];
   let current = "";
@@ -373,6 +393,78 @@ function extractTextFromPayload(payload: any): string {
   return "";
 }
 
+function getPayloadHeaderValue(headers: any[] = [], name: string): string {
+  return (
+    headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ||
+    ""
+  );
+}
+
+export function collectAttachmentParts(payload: any): GmailAttachmentPart[] {
+  if (!payload) return [];
+
+  const filename = String(payload.filename || "").trim();
+  const contentDisposition = getPayloadHeaderValue(
+    payload.headers,
+    "Content-Disposition"
+  );
+  const dispositionType = contentDisposition.split(";")[0].trim().toLowerCase();
+  const isFileAttachment =
+    filename &&
+    (dispositionType === "attachment" ||
+      (!dispositionType &&
+        !!(payload.body?.attachmentId || payload.body?.data)));
+
+  const attachments: GmailAttachmentPart[] = [];
+  if (isFileAttachment) {
+    attachments.push({
+      filename,
+      mimeType: payload.mimeType || "application/octet-stream",
+      attachmentId: payload.body?.attachmentId,
+      data: payload.body?.data,
+      size: payload.body?.size || 0,
+      contentDisposition,
+      contentId: getPayloadHeaderValue(payload.headers, "Content-ID"),
+    });
+  }
+
+  for (const part of payload.parts || []) {
+    attachments.push(...collectAttachmentParts(part));
+  }
+
+  return attachments;
+}
+
+async function resolveAttachments(
+  gmail: ReturnType<typeof getGmailClient>,
+  messageId: string,
+  payload: any
+): Promise<OutboundAttachment[]> {
+  const parts = collectAttachmentParts(payload);
+
+  return Promise.all(
+    parts.map(async (part) => {
+      let data = part.data || "";
+      if (!data && part.attachmentId) {
+        const attachment = await gmail.users.messages.attachments.get({
+          userId: "me",
+          messageId,
+          id: part.attachmentId,
+        });
+        data = attachment.data.data || "";
+      }
+
+      return {
+        filename: part.filename,
+        mimeType: part.mimeType,
+        content: Buffer.from(data, "base64url"),
+        contentDisposition: part.contentDisposition,
+        contentId: part.contentId,
+      };
+    })
+  );
+}
+
 function normalizeBodyForCompose(body: string): string {
   return body.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd();
 }
@@ -435,16 +527,90 @@ function buildReferencesHeader(references: string, messageId: string): string {
   return Array.from(new Set(parts)).join(" ");
 }
 
+function normalizeRawBody(body: string): string {
+  return body.replace(/\r\n/g, "\n").split("\n").join("\r\n");
+}
+
+function buildHeaderLines(headers: Array<[string, string]>): string[] {
+  return headers
+    .filter(([, value]) => value.trim().length > 0)
+    .map(([name, value]) => `${name}: ${value}`);
+}
+
 function buildRawMessage(headers: Array<[string, string]>, body: string): string {
   return [
     "MIME-Version: 1.0",
     `Content-Type: text/plain; charset="UTF-8"`,
-    ...headers
-      .filter(([, value]) => value.trim().length > 0)
-      .map(([name, value]) => `${name}: ${value}`),
+    ...buildHeaderLines(headers),
     "",
-    body.replace(/\r\n/g, "\n").split("\n").join("\r\n"),
+    normalizeRawBody(body),
   ].join("\r\n");
+}
+
+function makeMimeBoundary(): string {
+  return `voicemail_${crypto.randomBytes(12).toString("hex")}`;
+}
+
+function encodeBase64Mime(content: Buffer): string {
+  return content.toString("base64").replace(/.{1,76}/g, "$&\r\n").trimEnd();
+}
+
+function quoteMimeParameter(value: string): string {
+  return value.replace(/[\r\n]/g, " ").replace(/(["\\])/g, "\\$1");
+}
+
+function getAttachmentDisposition(attachment: OutboundAttachment): string {
+  const dispositionType = attachment.contentDisposition
+    ?.split(";")[0]
+    .trim()
+    .toLowerCase();
+  return dispositionType === "inline" ? "inline" : "attachment";
+}
+
+export function buildRawMultipartMessage(
+  headers: Array<[string, string]>,
+  body: string,
+  attachments: OutboundAttachment[],
+  boundary = makeMimeBoundary(),
+  maxBytes = MAX_GMAIL_RAW_MESSAGE_BYTES
+): string {
+  const parts = [
+    `--${boundary}`,
+    `Content-Type: text/plain; charset="UTF-8"`,
+    "",
+    normalizeRawBody(body),
+    ...attachments.flatMap((attachment) => {
+      const filename = quoteMimeParameter(attachment.filename);
+      return [
+        `--${boundary}`,
+        `Content-Type: ${
+          attachment.mimeType || "application/octet-stream"
+        }; name="${filename}"`,
+        "Content-Transfer-Encoding: base64",
+        `Content-Disposition: ${getAttachmentDisposition(
+          attachment
+        )}; filename="${filename}"`,
+        ...(attachment.contentId ? [`Content-ID: ${attachment.contentId}`] : []),
+        "",
+        encodeBase64Mime(attachment.content),
+      ];
+    }),
+    `--${boundary}--`,
+  ];
+
+  const raw = [
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    ...buildHeaderLines(headers),
+    "",
+    ...parts,
+  ].join("\r\n");
+
+  if (Buffer.byteLength(raw, "utf8") > maxBytes) {
+    throw new Error("Forwarded email with attachments exceeds Gmail size limits");
+  }
+
+  return raw;
 }
 
 async function getMessageContext(tokens: any, messageId: string) {
@@ -468,6 +634,7 @@ async function getMessageContext(tokens: any, messageId: string) {
     references: getHeaderValue(headers, "References"),
     body: extractTextFromPayload(res.data.payload) || res.data.snippet || "",
     threadId: res.data.threadId || "",
+    payload: res.data.payload,
   };
 }
 
@@ -1035,22 +1202,29 @@ export async function forwardEmail(
   const cc = mergeAddressHeaders([], options?.cc || [], [userEmail]);
   const bcc = mergeAddressHeaders([], options?.bcc || [], [userEmail]);
   const bodyWithFooter = appendVoicemailFooter(body, userEmail);
-  const raw = buildRawMessage(
-    [
-      ["To", to],
-      ["Cc", cc],
-      ["Bcc", bcc],
-      ["Subject", subject],
-    ],
-    formatGmailForwardBody(bodyWithFooter, {
-      from: original.from,
-      date: original.date,
-      subject: original.subject,
-      to: original.to,
-      cc: original.cc,
-      body: original.body,
-    })
+  const forwardBody = formatGmailForwardBody(bodyWithFooter, {
+    from: original.from,
+    date: original.date,
+    subject: original.subject,
+    to: original.to,
+    cc: original.cc,
+    body: original.body,
+  });
+  const headers: Array<[string, string]> = [
+    ["To", to],
+    ["Cc", cc],
+    ["Bcc", bcc],
+    ["Subject", subject],
+  ];
+  const attachments = await resolveAttachments(
+    gmail,
+    messageId,
+    original.payload
   );
+  const raw =
+    attachments.length > 0
+      ? buildRawMultipartMessage(headers, forwardBody, attachments)
+      : buildRawMessage(headers, forwardBody);
 
   const encoded = Buffer.from(raw).toString("base64url");
   await gmail.users.messages.send({
