@@ -174,6 +174,7 @@ describe("EmailTriageDeps logic", () => {
       expect(toolNames).toContain("end_session");
       expect(toolNames).toContain("log_out");
       expect(toolNames).toContain("get_session_summary");
+      expect(toolNames).toContain("forward_email");
     });
 
     it("mute_microphone tool invokes onMute callback", async () => {
@@ -234,6 +235,82 @@ describe("EmailTriageDeps logic", () => {
   });
 
   describe("gmailApi integration (via fetch mock)", () => {
+    it("reply tool sends reply mode plus cc and bcc", async () => {
+      mockFetch.mockResolvedValue({ json: async () => ({ success: true }) });
+
+      const { deps } = makeDeps([makeEmail()]);
+      const agent = createEmailTriageAgent(deps);
+      const replyTool = agent.tools.find((t: any) => t.name === "reply_to_email") as any;
+
+      const raw = await replyTool.invoke(
+        {} as any,
+        JSON.stringify({
+          message_id: "msg-1",
+          thread_id: "thread-1",
+          reply_text: "Thanks!",
+          reply_mode: "replyAll",
+          cc: ["finance@example.com"],
+          bcc: ["assistant@example.com"],
+        })
+      );
+
+      expect(typeof raw === "string" ? raw : JSON.stringify(raw)).not.toContain(
+        "An error occurred while running the tool"
+      );
+      const replyCall = mockFetch.mock.calls.find(
+        (call) =>
+          call[0] === "/api/gmail" &&
+          JSON.parse(call[1].body).action === "reply"
+      );
+      expect(replyCall).toBeTruthy();
+      expect(JSON.parse(replyCall![1].body)).toEqual({
+        action: "reply",
+        messageId: "msg-1",
+        threadId: "thread-1",
+        body: "Thanks!",
+        mode: "replyAll",
+        cc: ["finance@example.com"],
+        bcc: ["assistant@example.com"],
+      });
+    });
+
+    it("forward tool sends the forward payload", async () => {
+      mockFetch.mockResolvedValue({ json: async () => ({ success: true }) });
+
+      const { deps } = makeDeps([makeEmail()]);
+      const agent = createEmailTriageAgent(deps);
+      const forwardTool = agent.tools.find((t: any) => t.name === "forward_email") as any;
+
+      const raw = await forwardTool.invoke(
+        {} as any,
+        JSON.stringify({
+          message_id: "msg-1",
+          to: "team@example.com",
+          note: "Please handle this.",
+          cc: ["legal@example.com"],
+          bcc: ["ops@example.com"],
+        })
+      );
+
+      expect(typeof raw === "string" ? raw : JSON.stringify(raw)).not.toContain(
+        "An error occurred while running the tool"
+      );
+      const forwardCall = mockFetch.mock.calls.find(
+        (call) =>
+          call[0] === "/api/gmail" &&
+          JSON.parse(call[1].body).action === "forward"
+      );
+      expect(forwardCall).toBeTruthy();
+      expect(JSON.parse(forwardCall![1].body)).toEqual({
+        action: "forward",
+        messageId: "msg-1",
+        to: "team@example.com",
+        body: "Please handle this.",
+        cc: ["legal@example.com"],
+        bcc: ["ops@example.com"],
+      });
+    });
+
     it("reply then archive pattern", async () => {
       mockFetch
         .mockResolvedValueOnce({ json: async () => ({ success: true }) })
