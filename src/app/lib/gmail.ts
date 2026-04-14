@@ -1002,7 +1002,7 @@ export function appendVoicemailFooter(body: string, userEmail: string): string {
   if (!shouldAddVoicemailFooter(userEmail)) return body;
 
   const trimmedBody = body.replace(/\s+$/, "");
-  const footer = `Sent with voicemail.audio`;
+  const footer = `Sent with https://voicemail.audio`;
 
   if (!trimmedBody) return footer;
 
