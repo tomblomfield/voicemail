@@ -164,7 +164,9 @@ export async function addGoogleAccount(
     `INSERT INTO google_accounts (user_id, email, encrypted_tokens, is_primary)
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (email) DO UPDATE SET
+       user_id = EXCLUDED.user_id,
        encrypted_tokens = EXCLUDED.encrypted_tokens,
+       is_primary = EXCLUDED.is_primary,
        updated_at = NOW()
      RETURNING id, email, is_primary`,
     [userId, email.toLowerCase(), encryptedTokens, isPrimary]
