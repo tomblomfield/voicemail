@@ -10,6 +10,14 @@ import {
 } from "./db";
 import { Pool } from "pg";
 
+if (!process.env.DATABASE_URL) {
+  throw new Error(
+    "DATABASE_URL is not set. Copy the .env file first:\n" +
+      "  cp /Users/tom/Code/voice-email/.env .\n" +
+      "Local Postgres must be running with the voicemail_dev database."
+  );
+}
+
 const TEST_EMAIL = `test-${Date.now()}@example.com`;
 
 const pool = new Pool({

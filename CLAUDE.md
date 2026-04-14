@@ -79,6 +79,24 @@ The `users` table schema:
 
 Related tables: `google_accounts` (linked OAuth accounts), `user_memories` (conversation context).
 
+## Testing
+
+```sh
+npm test
+```
+
+Uses Vitest. Tests live next to source files (e.g. `gmail.test.ts`).
+
+**All tests must pass locally, including `db.test.ts`.** The db tests run against a
+local PostgreSQL database (`voicemail_dev`). Before running tests, ensure:
+
+1. Local Postgres is running (`pg_isready` should show "accepting connections")
+2. The `.env` file is present with `DATABASE_URL=postgresql://localhost:5432/voicemail_dev`
+   (copy from canonical source: `cp /Users/tom/Code/voice-email/.env .`)
+
+If `DATABASE_URL` is missing, `db.test.ts` will throw a clear error — do not skip or
+bypass it. Always run `npm test` and confirm **0 skipped, 0 failed** before committing.
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
