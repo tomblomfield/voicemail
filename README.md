@@ -73,6 +73,7 @@ Edit `.env` and fill in your keys:
 | Variable | Description |
 |---|---|
 | `OPENAI_API_KEY` | Your OpenAI API key |
+| `GEMINI_API_KEY` | Optional — Google AI Studio API key for Gemini voice models |
 | `GOOGLE_CLIENT_ID` | OAuth 2.0 client ID from Google Cloud Console |
 | `GOOGLE_CLIENT_SECRET` | OAuth 2.0 client secret from Google Cloud Console |
 | `GOOGLE_REDIRECT_URI` | `http://localhost:3000/api/auth/callback` (default) |

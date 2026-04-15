@@ -13,6 +13,30 @@ const COLORS = {
 } as const;
 
 type Category = keyof Omit<typeof COLORS, "reset">;
+type ClientLogContext = {
+  provider?: string;
+  model?: string;
+  voiceModel?: string;
+};
+
+let clientLogContext: ClientLogContext = {};
+
+export function setClientLogContext(context: ClientLogContext) {
+  clientLogContext = { ...context };
+}
+
+export function getClientLogContext(): ClientLogContext {
+  return { ...clientLogContext };
+}
+
+function addClientLogContext(data: unknown): unknown {
+  const context = getClientLogContext();
+  if (!context.provider && !context.model && !context.voiceModel) return data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    return { ...context, ...(data as Record<string, unknown>) };
+  }
+  return { ...context, value: data };
+}
 
 function formatValue(val: unknown): string {
   if (val === undefined) return "undefined";
@@ -83,7 +107,12 @@ export function debugLogClientVerbose(category: Category, label: string, data?: 
     fetch("/api/log", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ event: label, data, verbose: true, category }),
+      body: JSON.stringify({
+        event: label,
+        data: addClientLogContext(data),
+        verbose: true,
+        category,
+      }),
     }).catch(() => {}); // fire-and-forget
   } catch {}
 }
@@ -93,9 +122,15 @@ export function debugLogClient(category: Category, label: string, data?: unknown
   if (!IS_DEV) return;
   const ts = new Date().toISOString().slice(11, 23);
   const prefix = `[${ts}] [${category.toUpperCase()}]`;
+  const dataWithContext = addClientLogContext(data);
   if (data !== undefined) {
-    console.log(`${prefix} ${label}`, data);
+    console.log(`${prefix} ${label}`, dataWithContext);
   } else {
-    console.log(`${prefix} ${label}`);
+    const context = getClientLogContext();
+    if (context.provider || context.model || context.voiceModel) {
+      console.log(`${prefix} ${label}`, context);
+    } else {
+      console.log(`${prefix} ${label}`);
+    }
   }
 }

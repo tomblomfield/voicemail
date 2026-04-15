@@ -14,12 +14,59 @@ import {
 } from "@/app/agentConfigs/emailTriage";
 import type { InferredCalendarProfile } from "@/app/lib/calendar";
 import { canAutoStartRealtime } from "@/app/lib/microphonePermission";
+import {
+  DEFAULT_VOICE_MODEL,
+  VOICE_MODELS,
+  getVoiceModel,
+  type VoiceModelId,
+} from "@/app/lib/voiceModels";
+import { setClientLogContext } from "@/app/lib/debugLog";
 
 type AuthState = {
   authenticated: boolean;
   filterWriteEnabled: boolean;
   accounts: AccountInfo[];
 };
+
+function voiceLogFields(voiceModelId: VoiceModelId) {
+  const voiceModel = getVoiceModel(voiceModelId);
+  return {
+    provider: voiceModel.provider,
+    model: voiceModel.model,
+    voiceModel: voiceModel.id,
+  };
+}
+
+function serializeError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    };
+  }
+  if (error && typeof error === "object") {
+    const maybeEvent = error as {
+      type?: string;
+      message?: string;
+      error?: unknown;
+      target?: { readyState?: number; url?: string };
+    };
+    return {
+      type: maybeEvent.type,
+      message: maybeEvent.message,
+      error: serializeError(maybeEvent.error),
+      target: maybeEvent.target
+        ? {
+            readyState: maybeEvent.target.readyState,
+            url: maybeEvent.target.url,
+          }
+        : undefined,
+      stringValue: String(error),
+    };
+  }
+  return { message: String(error) };
+}
 
 function App() {
   const { addTranscriptMessage, addTranscriptBreadcrumb, transcriptItems } =
@@ -54,6 +101,7 @@ function App() {
   // Reconnection state
   const connectOptionsRef = useRef<{
     agent: ReturnType<typeof createEmailTriageAgent>;
+    voiceModel: VoiceModelId;
   } | null>(null);
   const reconnectAttemptRef = useRef(0);
   const isReconnectingRef = useRef(false);
@@ -63,6 +111,17 @@ function App() {
 
   const [isMuted, setIsMuted] = useState(false);
   const [showAccountPanel, setShowAccountPanel] = useState(false);
+  const [selectedVoiceModel, setSelectedVoiceModel] =
+    useState<VoiceModelId>(DEFAULT_VOICE_MODEL);
+
+  useEffect(() => {
+    const stored = localStorage.getItem("voice-model");
+    setSelectedVoiceModel(getVoiceModel(stored).id);
+  }, []);
+
+  useEffect(() => {
+    setClientLogContext(voiceLogFields(selectedVoiceModel));
+  }, [selectedVoiceModel]);
 
   // PWA install prompt
   const [showInstallBanner, setShowInstallBanner] = useState(false);
@@ -136,15 +195,33 @@ function App() {
       );
   }, []);
 
-  const fetchSessionData = async (): Promise<{ key: string; dbAvailable: boolean; accountCount: number } | null> => {
-    logClientEvent({ url: "/session" }, "fetch_session_token_request");
-    const tokenResponse = await fetch("/api/session");
+  const fetchSessionData = async (
+    voiceModel: VoiceModelId,
+  ): Promise<{ key: string; dbAvailable: boolean; accountCount: number } | null> => {
+    const modelLogFields = voiceLogFields(voiceModel);
+    const url = `/api/session?voiceModel=${encodeURIComponent(voiceModel)}`;
+    logClientEvent(
+      {
+        url,
+        ...modelLogFields,
+      },
+      "fetch_session_token_request",
+    );
+    const tokenResponse = await fetch(url);
     const data = await tokenResponse.json();
     logServerEvent(data, "fetch_session_token_response");
 
     if (!data.client_secret?.value) {
-      logClientEvent(data, "error.no_ephemeral_key");
-      console.error("No ephemeral key provided by the server");
+      logClientEvent(
+        {
+          ...data,
+          ...modelLogFields,
+        },
+        "error.no_ephemeral_key",
+      );
+      console.error("No ephemeral key provided by the server", {
+        ...modelLogFields,
+      });
       setSessionStatus("DISCONNECTED");
       return null;
     }
@@ -157,17 +234,19 @@ function App() {
   };
 
   const handleSessionDrop = useCallback(async () => {
+    const activeVoiceModel = connectOptionsRef.current?.voiceModel ?? selectedVoiceModel;
+    const modelLogFields = voiceLogFields(activeVoiceModel);
     if (reconnectAttemptRef.current >= maxReconnectAttempts) {
       setSessionStatus("DISCONNECTED");
       isReconnectingRef.current = false;
-      console.log("session_reconnect_failed: max_attempts_reached");
+      console.log("session_reconnect_failed: max_attempts_reached", modelLogFields);
       try {
         await fetch("/api/log", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             event: "session_reconnect_failed",
-            data: { reason: "max_attempts" },
+            data: { reason: "max_attempts", ...modelLogFields },
           }),
         });
       } catch {}
@@ -193,7 +272,7 @@ function App() {
       const opts = connectOptionsRef.current;
       if (!opts) return;
 
-      const session = await fetchSessionData();
+      const session = await fetchSessionData(opts.voiceModel);
       if (!session) {
         handleSessionDrop();
         return;
@@ -204,6 +283,7 @@ function App() {
         initialAgents: [opts.agent],
         audioElement: sdkAudioElement,
         extraContext: { addTranscriptBreadcrumb },
+        voiceModel: opts.voiceModel,
       });
 
       const sendReconnectEvents = () => {
@@ -226,7 +306,10 @@ function App() {
           });
           sendEvent({ type: "response.create" });
         } catch (e) {
-          console.warn("Data channel not ready on reconnect, retrying...", e);
+          console.warn("Data channel not ready on reconnect, retrying...", {
+            error: e,
+            ...modelLogFields,
+          });
           setTimeout(sendReconnectEvents, 500);
         }
       };
@@ -235,25 +318,28 @@ function App() {
       reconnectAttemptRef.current = 0;
       isReconnectingRef.current = false;
 
-      console.log(`session_reconnected: attempt=${attempt + 1}`);
+      console.log(`session_reconnected: attempt=${attempt + 1}`, modelLogFields);
       try {
         await fetch("/api/log", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             event: "session_reconnected",
-            data: { attempt: attempt + 1 },
+            data: { attempt: attempt + 1, ...modelLogFields },
           }),
         });
       } catch {}
     } catch (err) {
-      console.error("Reconnection failed:", err);
+      console.error("Reconnection failed:", { error: err, ...modelLogFields });
       handleSessionDrop();
     }
-  }, [connect, sdkAudioElement, sendEvent, addTranscriptBreadcrumb, addTranscriptMessage]);
+  }, [connect, sdkAudioElement, sendEvent, addTranscriptBreadcrumb, addTranscriptMessage, selectedVoiceModel]);
 
-  const connectToRealtime = async () => {
-    if (sessionStatus !== "DISCONNECTED") return;
+  const connectToRealtime = async (
+    voiceModel: VoiceModelId = selectedVoiceModel,
+    options: { force?: boolean } = {},
+  ) => {
+    if (!options.force && sessionStatus !== "DISCONNECTED") return;
     hasStartedSessionRef.current = true;
     setSessionStatus("CONNECTING");
     isManualDisconnectRef.current = false;
@@ -267,7 +353,7 @@ function App() {
       nextPageTokensRef.current = {};
       focusedAccountIdRef.current = null;
 
-      const session = await fetchSessionData();
+      const session = await fetchSessionData(voiceModel);
       if (!session) return;
 
       const actionKeyMap = { reply: "replied", skip: "skipped", archive: "archived", block: "blocked", unsubscribe: "unsubscribed" } as const;
@@ -306,15 +392,17 @@ function App() {
           window.location.href = "/api/auth/logout";
         },
         accounts: authState?.accounts || [],
+        logContext: voiceLogFields(voiceModel),
       });
 
-      connectOptionsRef.current = { agent };
+      connectOptionsRef.current = { agent, voiceModel };
 
       await connect({
         getEphemeralKey: async () => session.key,
         initialAgents: [agent],
         audioElement: sdkAudioElement,
         extraContext: { addTranscriptBreadcrumb },
+        voiceModel,
       });
 
       // Kick off the first model turn once the data channel is ready.
@@ -328,7 +416,10 @@ function App() {
       };
       setTimeout(startInitialResponse, 500);
     } catch (err) {
-      console.error("Error connecting:", err);
+      console.error("Error connecting:", {
+        error: serializeError(err),
+        ...voiceLogFields(voiceModel),
+      });
       setSessionStatus("DISCONNECTED");
     }
   };
@@ -374,6 +465,16 @@ function App() {
       disconnectFromRealtime();
     } else {
       connectToRealtime();
+    }
+  };
+
+  const changeVoiceModel = (voiceModel: VoiceModelId) => {
+    setSelectedVoiceModel(voiceModel);
+    localStorage.setItem("voice-model", voiceModel);
+
+    if (sessionStatus === "CONNECTED") {
+      disconnectFromRealtime();
+      setTimeout(() => connectToRealtime(voiceModel, { force: true }), 250);
     }
   };
 
@@ -536,6 +637,38 @@ function App() {
                 </button>
               </div>
             ))}
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-gray-800/60">
+            <div className="text-sm font-medium text-gray-400 mb-2">
+              Voice model
+            </div>
+            <div className="space-y-1.5">
+              {VOICE_MODELS.map((model) => (
+                <label
+                  key={model.id}
+                  className="flex items-start gap-2 py-1.5 text-left"
+                >
+                  <input
+                    type="radio"
+                    name="voice-model"
+                    value={model.id}
+                    checked={selectedVoiceModel === model.id}
+                    disabled={isConnecting}
+                    onChange={() => changeVoiceModel(model.id)}
+                    className="mt-1 accent-indigo-500"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-sm text-gray-200">
+                      {model.label}
+                    </span>
+                    <span className="block text-xs text-gray-500">
+                      {model.description}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </div>
           </div>
 
           <div className="mt-3 pt-3 border-t border-gray-800/60 flex flex-col gap-2">

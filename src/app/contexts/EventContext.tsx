@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, FC, PropsWithChildren } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { LoggedEvent } from "@/app/types";
+import { getClientLogContext } from "@/app/lib/debugLog";
 
 type EventContextValue = {
   loggedEvents: LoggedEvent[];
@@ -18,14 +19,18 @@ export const EventProvider: FC<PropsWithChildren> = ({ children }) => {
   const [loggedEvents, setLoggedEvents] = useState<LoggedEvent[]>([]);
 
   function addLoggedEvent(direction: "client" | "server", eventName: string, eventData: Record<string, any>) {
-    const id = eventData.event_id || uuidv4();
+    const eventDataWithContext: Record<string, any> = {
+      ...getClientLogContext(),
+      ...eventData,
+    };
+    const id = eventDataWithContext.event_id || uuidv4();
     setLoggedEvents((prev) => [
       ...prev,
       {
         id,
         direction,
         eventName,
-        eventData,
+        eventData: eventDataWithContext,
         timestamp: new Date().toLocaleTimeString(),
         expanded: false,
       },

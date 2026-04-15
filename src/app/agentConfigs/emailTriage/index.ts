@@ -56,6 +56,11 @@ export interface EmailTriageDeps {
   accounts: AccountInfo[];
   focusedAccountId: () => string | null;
   setFocusedAccountId: (id: string | null) => void;
+  logContext?: {
+    provider: string;
+    model: string;
+    voiceModel: string;
+  };
 }
 
 function buildMultiAccountInstructions(accounts: AccountInfo[]): string {
@@ -1680,7 +1685,10 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
             await fetch("/api/log", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ event: "session_summary", data: result }),
+              body: JSON.stringify({
+                event: "session_summary",
+                data: { ...result, ...deps.logContext },
+              }),
             });
           } catch {}
           return result;

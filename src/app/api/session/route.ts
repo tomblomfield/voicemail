@@ -15,8 +15,8 @@ import {
   getSessionUserId,
 } from "@/app/lib/session";
 import { logLatencyTelemetry } from "@/app/lib/telemetry";
-
-const REALTIME_MODEL = "gpt-realtime-1.5";
+import { GoogleGenAI } from "@google/genai";
+import { getVoiceModel } from "@/app/lib/voiceModels";
 
 export async function GET(request: NextRequest) {
   const sessionCookie = request.cookies.get(SESSION_COOKIE_NAME);
@@ -49,18 +49,90 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let openaiStartMs: number | null = null;
+  const voiceModel = getVoiceModel(request.nextUrl.searchParams.get("voiceModel"));
+  let providerStartMs: number | null = null;
   try {
     console.log(
-      `session_started: ${userEmail} accounts=${accountCount}`
+      `session_started: ${userEmail} accounts=${accountCount} voiceModel=${voiceModel.id}`
     );
     if (userEmail && isDbAvailable()) {
       await initDb();
       await upsertUser(userEmail);
     }
 
-    debugLog("api", "Creating OpenAI realtime session...");
-    openaiStartMs = Date.now();
+    if (voiceModel.provider === "gemini") {
+      const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+      if (!apiKey) {
+        logLatencyTelemetry({
+          provider: "gemini",
+          operation: "live.auth_tokens.create",
+          durationMs: 0,
+          status: "error",
+          route: "/api/session",
+          httpStatus: 500,
+          model: voiceModel.model,
+          errorType: "MissingGeminiApiKey",
+          metrics: { accountCount },
+        });
+        debugLog("error", "Gemini voice model missing API key", {
+          provider: voiceModel.provider,
+          model: voiceModel.model,
+          voiceModel: voiceModel.id,
+        });
+        return NextResponse.json(
+          { error: "GEMINI_API_KEY is required for Gemini voice models" },
+          { status: 500 }
+        );
+      }
+
+      debugLog("api", "Creating Gemini Live ephemeral token...", {
+        provider: voiceModel.provider,
+        model: voiceModel.model,
+        voiceModel: voiceModel.id,
+      });
+      providerStartMs = Date.now();
+      const client = new GoogleGenAI({ apiKey, apiVersion: "v1alpha" });
+      const token = await client.authTokens.create({
+        config: {
+          uses: 1,
+          expireTime: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+          newSessionExpireTime: new Date(Date.now() + 60 * 1000).toISOString(),
+          httpOptions: { apiVersion: "v1alpha" },
+        },
+      });
+
+      logLatencyTelemetry({
+        provider: "gemini",
+        operation: "live.auth_tokens.create",
+        durationMs: Date.now() - providerStartMs,
+        status: "ok",
+        route: "/api/session",
+        model: voiceModel.model,
+        metrics: { accountCount },
+      });
+
+      debugLog("api", "Gemini Live ephemeral token created", {
+        provider: voiceModel.provider,
+        model: voiceModel.model,
+        voiceModel: voiceModel.id,
+      });
+
+      return NextResponse.json({
+        client_secret: { value: token.name },
+        provider: voiceModel.provider,
+        voiceModel: voiceModel.id,
+        model: voiceModel.model,
+        dbAvailable: isDbAvailable(),
+        accountCount,
+      });
+    }
+
+    debugLog("api", "Creating OpenAI realtime session...", {
+      provider: voiceModel.provider,
+      model: voiceModel.model,
+      voiceModel: voiceModel.id,
+    });
+    providerStartMs = Date.now();
     const response = await fetch(
       "https://api.openai.com/v1/realtime/sessions",
       {
@@ -70,7 +142,7 @@ export async function GET(request: NextRequest) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: REALTIME_MODEL,
+          model: voiceModel.model,
         }),
       }
     );
@@ -78,35 +150,54 @@ export async function GET(request: NextRequest) {
     logLatencyTelemetry({
       provider: "openai",
       operation: "realtime.sessions.create",
-      durationMs: Date.now() - openaiStartMs,
+      durationMs: Date.now() - providerStartMs,
       status: response.ok ? "ok" : "error",
       route: "/api/session",
       httpStatus: response.status,
-      model: REALTIME_MODEL,
+      model: voiceModel.model,
       metrics: { accountCount },
     });
     debugLog("api", "OpenAI realtime session created", {
+      provider: voiceModel.provider,
       id: data.id,
       model: data.model,
+      requestedModel: voiceModel.model,
+      voiceModel: voiceModel.id,
       expires_at: data.expires_at,
     });
-    debugLogVerbose("api", "OpenAI realtime session FULL RESPONSE", data);
+    debugLogVerbose("api", "OpenAI realtime session FULL RESPONSE", {
+      provider: voiceModel.provider,
+      model: voiceModel.model,
+      voiceModel: voiceModel.id,
+      response: data,
+    });
     return NextResponse.json({
       ...data,
+      provider: voiceModel.provider,
+      voiceModel: voiceModel.id,
+      model: voiceModel.model,
       dbAvailable: isDbAvailable(),
       accountCount,
     });
   } catch (error) {
     logLatencyTelemetry({
-      provider: "openai",
-      operation: "realtime.sessions.create",
-      durationMs: openaiStartMs === null ? 0 : Date.now() - openaiStartMs,
+      provider: voiceModel.provider,
+      operation:
+        voiceModel.provider === "gemini"
+          ? "live.auth_tokens.create"
+          : "realtime.sessions.create",
+      durationMs: providerStartMs === null ? 0 : Date.now() - providerStartMs,
       status: "error",
       route: "/api/session",
-      model: REALTIME_MODEL,
+      model: voiceModel.model,
       errorType: error instanceof Error ? error.name : "Error",
     });
-    console.error("Error in /session:", error);
+    console.error("Error in /session:", {
+      error,
+      provider: voiceModel.provider,
+      model: voiceModel.model,
+      voiceModel: voiceModel.id,
+    });
     return NextResponse.json(
       { error: "Internal Server Error" },
       { status: 500 }
