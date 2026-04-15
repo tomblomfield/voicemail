@@ -13,6 +13,7 @@ import {
   AccountInfo,
 } from "@/app/agentConfigs/emailTriage";
 import type { InferredCalendarProfile } from "@/app/lib/calendar";
+import { canAutoStartRealtime } from "@/app/lib/microphonePermission";
 
 type AuthState = {
   authenticated: boolean;
@@ -57,6 +58,7 @@ function App() {
   const reconnectAttemptRef = useRef(0);
   const isReconnectingRef = useRef(false);
   const isManualDisconnectRef = useRef(false);
+  const hasStartedSessionRef = useRef(false);
   const maxReconnectAttempts = 5;
 
   const [isMuted, setIsMuted] = useState(false);
@@ -252,6 +254,7 @@ function App() {
 
   const connectToRealtime = async () => {
     if (sessionStatus !== "DISCONNECTED") return;
+    hasStartedSessionRef.current = true;
     setSessionStatus("CONNECTING");
     isManualDisconnectRef.current = false;
 
@@ -415,13 +418,24 @@ function App() {
   const filterWriteEnabled = authState?.filterWriteEnabled ?? false;
   const accounts = authState?.accounts || [];
 
-  // Auto-start conversation when authenticated
-  const hasAutoStarted = useRef(false);
+  // Auto-start only when the browser has already granted persistent mic access.
+  // Otherwise reloads in browsers with one-time/ephemeral mic grants immediately
+  // trigger another permission prompt before the user taps Start.
   useEffect(() => {
-    if (isAuthenticated && sessionStatus === "DISCONNECTED" && !hasAutoStarted.current) {
-      hasAutoStarted.current = true;
-      connectToRealtime();
+    if (!isAuthenticated || sessionStatus !== "DISCONNECTED" || hasStartedSessionRef.current) {
+      return;
     }
+
+    let isCurrent = true;
+
+    canAutoStartRealtime().then((canAutoStart) => {
+      if (!isCurrent || !canAutoStart || hasStartedSessionRef.current) return;
+      connectToRealtime();
+    });
+
+    return () => {
+      isCurrent = false;
+    };
   }, [isAuthenticated, sessionStatus]);
 
   if (authState === null) {
