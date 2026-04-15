@@ -17,6 +17,12 @@ type ClientLogContext = {
   provider?: string;
   model?: string;
   voiceModel?: string;
+  voice?: string;
+  speechSpeed?: number;
+  noiseCancellation?: string;
+  interruptSensitivity?: string;
+  openAIVoice?: string;
+  geminiVoice?: string;
 };
 
 let clientLogContext: ClientLogContext = {};

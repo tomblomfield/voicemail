@@ -15,6 +15,12 @@ import { SessionStatus } from '../types';
 import { debugLogClient, debugLogClientVerbose, setClientLogContext } from '../lib/debugLog';
 import { logClientLatencyTelemetry } from '../lib/telemetry';
 import { DEFAULT_VOICE_MODEL, getVoiceModel, type VoiceModelId } from '../lib/voiceModels';
+import {
+  DEFAULT_VOICE_SETTINGS,
+  getGeminiRealtimeSettings,
+  getOpenAIRealtimeSettings,
+  type VoiceSettings,
+} from '../lib/voiceSettings';
 
 export interface RealtimeSessionCallbacks {
   onConnectionChange?: (status: SessionStatus) => void;
@@ -28,6 +34,7 @@ export interface ConnectOptions {
   extraContext?: Record<string, any>;
   outputGuardrails?: any[];
   voiceModel?: VoiceModelId;
+  voiceSettings?: VoiceSettings;
 }
 
 type GeminiLiveRefs = {
@@ -40,6 +47,7 @@ type GeminiLiveRefs = {
   silentGain: GainNode;
   scheduledSources: AudioBufferSourceNode[];
   nextPlaybackTime: number;
+  speechSpeed: number;
   audioChunksSent: number;
   audioChunksWithSignal: number;
   firstSignalChunkLogged: boolean;
@@ -105,11 +113,26 @@ function getRms(input: Float32Array): number {
 }
 
 async function resumeAudioContext(context: AudioContext, label: string) {
-  if (context.state === "suspended") {
-    await context.resume();
+  const startingState = context.state;
+  if (startingState === "suspended") {
+    try {
+      await Promise.race([
+        context.resume(),
+        new Promise((resolve) => setTimeout(resolve, 500)),
+      ]);
+    } catch (error) {
+      debugLogClientVerbose("error", "gemini_audio_context_resume_failed", {
+        label,
+        startingState,
+        error: error instanceof Error
+          ? { name: error.name, message: error.message }
+          : String(error),
+      });
+    }
   }
   debugLogClientVerbose("event", "gemini_audio_context_state", {
     label,
+    startingState,
     state: context.state,
     sampleRate: context.sampleRate,
   });
@@ -310,11 +333,12 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
 
     const source = gemini.outputContext.createBufferSource();
     source.buffer = buffer;
+    source.playbackRate.value = gemini.speechSpeed;
     source.connect(gemini.outputContext.destination);
 
     const startAt = Math.max(gemini.outputContext.currentTime, gemini.nextPlaybackTime);
     source.start(startAt);
-    gemini.nextPlaybackTime = startAt + buffer.duration;
+    gemini.nextPlaybackTime = startAt + buffer.duration / gemini.speechSpeed;
     gemini.scheduledSources.push(source);
     source.onended = () => {
       gemini.scheduledSources = gemini.scheduledSources.filter((s) => s !== source);
@@ -479,6 +503,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
       extraContext,
       outputGuardrails,
       voiceModel = DEFAULT_VOICE_MODEL,
+      voiceSettings = DEFAULT_VOICE_SETTINGS,
     }: ConnectOptions) => {
       if (sessionRef.current || geminiRef.current) return; // already connected
 
@@ -487,11 +512,22 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
       const ek = await getEphemeralKey();
       const rootAgent = initialAgents[0];
       const selectedVoiceModel = getVoiceModel(voiceModel);
+      const selectedVoiceSettings = voiceSettings;
+      const selectedVoice =
+        selectedVoiceModel.provider === "gemini"
+          ? selectedVoiceSettings.geminiVoice
+          : selectedVoiceSettings.openAIVoice;
       activeVoiceModelRef.current = selectedVoiceModel;
       setClientLogContext({
         provider: selectedVoiceModel.provider,
         model: selectedVoiceModel.model,
         voiceModel: selectedVoiceModel.id,
+        voice: selectedVoice,
+        speechSpeed: selectedVoiceSettings.speechSpeed,
+        noiseCancellation: selectedVoiceSettings.noiseCancellation,
+        interruptSensitivity: selectedVoiceSettings.interruptSensitivity,
+        openAIVoice: selectedVoiceSettings.openAIVoice,
+        geminiVoice: selectedVoiceSettings.geminiVoice,
       });
 
       if (selectedVoiceModel.provider === "gemini") {
@@ -509,8 +545,10 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
         debugLogClient("event", "Connecting to Gemini Live...", {
           model: selectedVoiceModel.model,
           toolCount: functionDeclarations.length,
+          voiceSettings: selectedVoiceSettings,
         });
         const connectStartMs = performance.now();
+        const geminiSettings = getGeminiRealtimeSettings(selectedVoiceSettings);
 
         try {
           const outputContext = new AudioContext({ sampleRate: 24000 });
@@ -534,14 +572,25 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
             resumeAudioContext(outputContext, "output"),
           ]);
 
-          const mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              channelCount: 1,
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            },
-          });
+          let mediaStream: MediaStream;
+          try {
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+              audio: geminiSettings.mediaTrackConstraints,
+            });
+          } catch (error) {
+            if (selectedVoiceSettings.noiseCancellation === "off") {
+              throw error;
+            }
+            debugLogClientVerbose("error", "gemini_mic_constraints_fallback", {
+              error: error instanceof Error
+                ? { name: error.name, message: error.message }
+                : String(error),
+              requestedConstraints: geminiSettings.mediaTrackConstraints,
+            });
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+              audio: { channelCount: 1 },
+            });
+          }
           const audioTracks = mediaStream.getAudioTracks();
           debugLogClientVerbose("event", "gemini_mic_stream_ready", {
             active: mediaStream.active,
@@ -634,11 +683,9 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
               tools: [{ functionDeclarations }],
               inputAudioTranscription: {},
               outputAudioTranscription: {},
+              speechConfig: geminiSettings.speechConfig,
               realtimeInputConfig: {
-                automaticActivityDetection: {
-                  prefixPaddingMs: 200,
-                  silenceDurationMs: 500,
-                },
+                ...geminiSettings.realtimeInputConfig,
               },
               temperature: 0.7,
             },
@@ -654,6 +701,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
             silentGain,
             scheduledSources: [],
             nextPlaybackTime: outputContext.currentTime,
+            speechSpeed: geminiSettings.speechSpeed,
             audioChunksSent: 0,
             audioChunksWithSignal: 0,
             firstSignalChunkLogged: false,
@@ -739,6 +787,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
         return;
       }
 
+      const openAISettings = getOpenAIRealtimeSettings(selectedVoiceSettings);
       sessionRef.current = new RealtimeSession(rootAgent, {
         transport: new OpenAIRealtimeWebRTC({
           audioElement,
@@ -750,15 +799,12 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
         }),
         model: selectedVoiceModel.model,
         config: {
-          turn_detection: {
-            type: 'server_vad',
-            threshold: 0.65,
-            prefix_padding_ms: 200,
-            silence_duration_ms: 500,
-            create_response: true,
-            eagerness: 'low',
+          turnDetection: openAISettings.turnDetection,
+          providerData: {
+            input_audio_noise_reduction:
+              openAISettings.inputAudioNoiseReduction,
+            speed: openAISettings.speed,
           },
-          speed: 1.2,
         } as any,
         outputGuardrails: outputGuardrails ?? [],
         context: extraContext ?? {},
@@ -766,6 +812,8 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
 
       debugLogClient("event", "Connecting to OpenAI realtime...", {
         model: selectedVoiceModel.model,
+        voiceSettings: selectedVoiceSettings,
+        realtimeSettings: openAISettings,
       });
       const connectStartMs = performance.now();
       try {

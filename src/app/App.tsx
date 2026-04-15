@@ -20,6 +20,20 @@ import {
   getVoiceModel,
   type VoiceModelId,
 } from "@/app/lib/voiceModels";
+import {
+  DEFAULT_VOICE_SETTINGS,
+  INTERRUPT_SENSITIVITY_OPTIONS,
+  NOISE_CANCELLATION_OPTIONS,
+  SPEECH_SPEED_OPTIONS,
+  getSelectedVoiceForModel,
+  getVoiceOptionsForModel,
+  getVoiceSettingPatch,
+  getVoiceSettings,
+  parseStoredVoiceSettings,
+  type InterruptSensitivity,
+  type NoiseCancellationMode,
+  type VoiceSettings,
+} from "@/app/lib/voiceSettings";
 import { setClientLogContext } from "@/app/lib/debugLog";
 
 type AuthState = {
@@ -34,6 +48,16 @@ function voiceLogFields(voiceModelId: VoiceModelId) {
     provider: voiceModel.provider,
     model: voiceModel.model,
     voiceModel: voiceModel.id,
+  };
+}
+
+function voiceSettingsLogFields(voiceSettings: VoiceSettings) {
+  return {
+    speechSpeed: voiceSettings.speechSpeed,
+    noiseCancellation: voiceSettings.noiseCancellation,
+    interruptSensitivity: voiceSettings.interruptSensitivity,
+    openAIVoice: voiceSettings.openAIVoice,
+    geminiVoice: voiceSettings.geminiVoice,
   };
 }
 
@@ -102,6 +126,7 @@ function App() {
   const connectOptionsRef = useRef<{
     agent: ReturnType<typeof createEmailTriageAgent>;
     voiceModel: VoiceModelId;
+    voiceSettings: VoiceSettings;
   } | null>(null);
   const reconnectAttemptRef = useRef(0);
   const isReconnectingRef = useRef(false);
@@ -113,15 +138,21 @@ function App() {
   const [showAccountPanel, setShowAccountPanel] = useState(false);
   const [selectedVoiceModel, setSelectedVoiceModel] =
     useState<VoiceModelId>(DEFAULT_VOICE_MODEL);
+  const [voiceSettings, setVoiceSettings] =
+    useState<VoiceSettings>(DEFAULT_VOICE_SETTINGS);
 
   useEffect(() => {
     const stored = localStorage.getItem("voice-model");
     setSelectedVoiceModel(getVoiceModel(stored).id);
+    setVoiceSettings(parseStoredVoiceSettings(localStorage.getItem("voice-settings")));
   }, []);
 
   useEffect(() => {
-    setClientLogContext(voiceLogFields(selectedVoiceModel));
-  }, [selectedVoiceModel]);
+    setClientLogContext({
+      ...voiceLogFields(selectedVoiceModel),
+      ...voiceSettingsLogFields(voiceSettings),
+    });
+  }, [selectedVoiceModel, voiceSettings]);
 
   // PWA install prompt
   const [showInstallBanner, setShowInstallBanner] = useState(false);
@@ -235,7 +266,10 @@ function App() {
 
   const handleSessionDrop = useCallback(async () => {
     const activeVoiceModel = connectOptionsRef.current?.voiceModel ?? selectedVoiceModel;
+    const activeVoiceSettings =
+      connectOptionsRef.current?.voiceSettings ?? voiceSettings;
     const modelLogFields = voiceLogFields(activeVoiceModel);
+    const settingsLogFields = voiceSettingsLogFields(activeVoiceSettings);
     if (reconnectAttemptRef.current >= maxReconnectAttempts) {
       setSessionStatus("DISCONNECTED");
       isReconnectingRef.current = false;
@@ -246,7 +280,11 @@ function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             event: "session_reconnect_failed",
-            data: { reason: "max_attempts", ...modelLogFields },
+            data: {
+              reason: "max_attempts",
+              ...modelLogFields,
+              ...settingsLogFields,
+            },
           }),
         });
       } catch {}
@@ -284,6 +322,7 @@ function App() {
         audioElement: sdkAudioElement,
         extraContext: { addTranscriptBreadcrumb },
         voiceModel: opts.voiceModel,
+        voiceSettings: opts.voiceSettings,
       });
 
       const sendReconnectEvents = () => {
@@ -309,6 +348,7 @@ function App() {
           console.warn("Data channel not ready on reconnect, retrying...", {
             error: e,
             ...modelLogFields,
+            ...settingsLogFields,
           });
           setTimeout(sendReconnectEvents, 500);
         }
@@ -325,21 +365,31 @@ function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             event: "session_reconnected",
-            data: { attempt: attempt + 1, ...modelLogFields },
+            data: {
+              attempt: attempt + 1,
+              ...modelLogFields,
+              ...settingsLogFields,
+            },
           }),
         });
       } catch {}
     } catch (err) {
-      console.error("Reconnection failed:", { error: err, ...modelLogFields });
+      console.error("Reconnection failed:", {
+        error: err,
+        ...modelLogFields,
+        ...settingsLogFields,
+      });
       handleSessionDrop();
     }
-  }, [connect, sdkAudioElement, sendEvent, addTranscriptBreadcrumb, addTranscriptMessage, selectedVoiceModel]);
+  }, [connect, sdkAudioElement, sendEvent, addTranscriptBreadcrumb, addTranscriptMessage, selectedVoiceModel, voiceSettings]);
 
   const connectToRealtime = async (
     voiceModel: VoiceModelId = selectedVoiceModel,
+    settings: VoiceSettings = voiceSettings,
     options: { force?: boolean } = {},
   ) => {
     if (!options.force && sessionStatus !== "DISCONNECTED") return;
+    const selectedVoice = getSelectedVoiceForModel(voiceModel, settings);
     hasStartedSessionRef.current = true;
     setSessionStatus("CONNECTING");
     isManualDisconnectRef.current = false;
@@ -380,6 +430,7 @@ function App() {
         focusedAccountId: () => focusedAccountIdRef.current,
         setFocusedAccountId: (id) => { focusedAccountIdRef.current = id; },
         dbAvailable: session.dbAvailable,
+        voice: selectedVoice,
         onMute: () => {
           setIsMuted(true);
           mute(true);
@@ -392,10 +443,14 @@ function App() {
           window.location.href = "/api/auth/logout";
         },
         accounts: authState?.accounts || [],
-        logContext: voiceLogFields(voiceModel),
+        logContext: {
+          ...voiceLogFields(voiceModel),
+          ...voiceSettingsLogFields(settings),
+          voice: selectedVoice,
+        },
       });
 
-      connectOptionsRef.current = { agent, voiceModel };
+      connectOptionsRef.current = { agent, voiceModel, voiceSettings: settings };
 
       await connect({
         getEphemeralKey: async () => session.key,
@@ -403,6 +458,7 @@ function App() {
         audioElement: sdkAudioElement,
         extraContext: { addTranscriptBreadcrumb },
         voiceModel,
+        voiceSettings: settings,
       });
 
       // Kick off the first model turn once the data channel is ready.
@@ -416,10 +472,23 @@ function App() {
       };
       setTimeout(startInitialResponse, 500);
     } catch (err) {
-      console.error("Error connecting:", {
+      const errorDetails = {
         error: serializeError(err),
         ...voiceLogFields(voiceModel),
-      });
+        ...voiceSettingsLogFields(settings),
+        voice: selectedVoice,
+      };
+      try {
+        await fetch("/api/log", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            event: "connect_to_realtime_failed",
+            category: "error",
+            data: errorDetails,
+          }),
+        });
+      } catch {}
       setSessionStatus("DISCONNECTED");
     }
   };
@@ -474,8 +543,24 @@ function App() {
 
     if (sessionStatus === "CONNECTED") {
       disconnectFromRealtime();
-      setTimeout(() => connectToRealtime(voiceModel, { force: true }), 250);
+      setTimeout(() => connectToRealtime(voiceModel, voiceSettings, { force: true }), 250);
     }
+  };
+
+  const changeVoiceSettings = (patch: Partial<VoiceSettings>) => {
+    const next = getVoiceSettings({ ...voiceSettings, ...patch });
+    setVoiceSettings(next);
+    localStorage.setItem("voice-settings", JSON.stringify(next));
+
+    if (sessionStatus === "CONNECTED") {
+      disconnectFromRealtime();
+      setTimeout(() => connectToRealtime(selectedVoiceModel, next, { force: true }), 250);
+    }
+  };
+
+  const changeVoice = (voice: string) => {
+    const provider = getVoiceModel(selectedVoiceModel).provider;
+    changeVoiceSettings(getVoiceSettingPatch(provider, voice));
   };
 
   const removeAccount = async (accountId: string) => {
@@ -668,6 +753,124 @@ function App() {
                   </span>
                 </label>
               ))}
+            </div>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-gray-800/60 space-y-3">
+            <div>
+              <label
+                htmlFor="voice"
+                className="block text-sm font-medium text-gray-400 mb-1.5"
+              >
+                Voice
+              </label>
+              <select
+                id="voice"
+                value={getSelectedVoiceForModel(selectedVoiceModel, voiceSettings)}
+                disabled={isConnecting}
+                onChange={(event) => changeVoice(event.target.value)}
+                className="w-full rounded-md bg-gray-950 border border-gray-800 px-2.5 py-2 text-sm text-gray-200"
+              >
+                {getVoiceOptionsForModel(selectedVoiceModel).map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label} - {option.description}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label
+                htmlFor="speech-speed"
+                className="block text-sm font-medium text-gray-400 mb-1.5"
+              >
+                Speech speed
+              </label>
+              <select
+                id="speech-speed"
+                value={voiceSettings.speechSpeed}
+                disabled={isConnecting}
+                onChange={(event) =>
+                  changeVoiceSettings({
+                    speechSpeed: Number(event.target.value),
+                  })
+                }
+                className="w-full rounded-md bg-gray-950 border border-gray-800 px-2.5 py-2 text-sm text-gray-200"
+              >
+                {SPEECH_SPEED_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label
+                htmlFor="noise-cancellation"
+                className="block text-sm font-medium text-gray-400 mb-1.5"
+              >
+                Background noise cancellation
+              </label>
+              <select
+                id="noise-cancellation"
+                value={voiceSettings.noiseCancellation}
+                disabled={isConnecting}
+                onChange={(event) =>
+                  changeVoiceSettings({
+                    noiseCancellation: event.target
+                      .value as NoiseCancellationMode,
+                  })
+                }
+                className="w-full rounded-md bg-gray-950 border border-gray-800 px-2.5 py-2 text-sm text-gray-200"
+              >
+                {NOISE_CANCELLATION_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-500">
+                {
+                  NOISE_CANCELLATION_OPTIONS.find(
+                    (option) => option.value === voiceSettings.noiseCancellation,
+                  )?.description
+                }
+              </p>
+            </div>
+
+            <div>
+              <label
+                htmlFor="interrupt-sensitivity"
+                className="block text-sm font-medium text-gray-400 mb-1.5"
+              >
+                Interrupt sensitivity
+              </label>
+              <select
+                id="interrupt-sensitivity"
+                value={voiceSettings.interruptSensitivity}
+                disabled={isConnecting}
+                onChange={(event) =>
+                  changeVoiceSettings({
+                    interruptSensitivity: event.target
+                      .value as InterruptSensitivity,
+                  })
+                }
+                className="w-full rounded-md bg-gray-950 border border-gray-800 px-2.5 py-2 text-sm text-gray-200"
+              >
+                {INTERRUPT_SENSITIVITY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-500">
+                {
+                  INTERRUPT_SENSITIVITY_OPTIONS.find(
+                    (option) => option.value === voiceSettings.interruptSensitivity,
+                  )?.description
+                }
+              </p>
             </div>
           </div>
 

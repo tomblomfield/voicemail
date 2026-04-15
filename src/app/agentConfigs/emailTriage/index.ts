@@ -56,10 +56,12 @@ export interface EmailTriageDeps {
   accounts: AccountInfo[];
   focusedAccountId: () => string | null;
   setFocusedAccountId: (id: string | null) => void;
+  voice?: string;
   logContext?: {
     provider: string;
     model: string;
     voiceModel: string;
+    voice?: string;
   };
 }
 
@@ -160,7 +162,7 @@ export function createEmailTriageAgent(deps: EmailTriageDeps) {
 
   const agent = new RealtimeAgent({
     name: "emailTriage",
-    voice: "ash",
+    voice: deps.voice ?? "ash",
     handoffDescription: "Voice email and calendar assistant for hands-free use",
 
     instructions: `
