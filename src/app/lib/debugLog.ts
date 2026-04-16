@@ -57,7 +57,6 @@ function appendToFile(line: string) {
   if (!IS_SERVER) return;
   try {
     // Dynamic import hidden from webpack static analysis
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mod = "fs";
     const fs = __non_webpack_require__(mod);
     const logFile = __non_webpack_require__("path").join(process.cwd(), "debug.log");

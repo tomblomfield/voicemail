@@ -140,11 +140,9 @@ async function resumeAudioContext(context: AudioContext, label: string) {
 
 function getSafeTrackDetails(track: MediaStreamTrack) {
   const settings = track.getSettings?.() ?? {};
-  const {
-    deviceId: _deviceId,
-    groupId: _groupId,
-    ...safeSettings
-  } = settings;
+  // Strip sensitive device identifiers before logging
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { deviceId, groupId, ...safeSettings } = settings;
 
   return {
     enabled: track.enabled,

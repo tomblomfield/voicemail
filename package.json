@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "vitest run"
+    "test": "next lint && vitest run"
   },
   "dependencies": {
     "@google/genai": "^1.50.1",
