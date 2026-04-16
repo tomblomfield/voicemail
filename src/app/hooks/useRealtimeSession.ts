@@ -42,6 +42,8 @@ type GeminiLiveRefs = {
   mediaStream: MediaStream;
   inputContext: AudioContext;
   outputContext: AudioContext;
+  outputDestination: MediaStreamDestinationNode;
+  audioElement: HTMLAudioElement | null;
   processor: ScriptProcessorNode;
   source: MediaStreamAudioSourceNode;
   silentGain: GainNode;
@@ -333,7 +335,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
     const source = gemini.outputContext.createBufferSource();
     source.buffer = buffer;
     source.playbackRate.value = gemini.speechSpeed;
-    source.connect(gemini.outputContext.destination);
+    source.connect(gemini.outputDestination);
 
     const startAt = Math.max(gemini.outputContext.currentTime, gemini.nextPlaybackTime);
     source.start(startAt);
@@ -446,6 +448,9 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
     for (const track of gemini.mediaStream.getTracks()) {
       track.stop();
     }
+    if (gemini.audioElement) {
+      gemini.audioElement.srcObject = null;
+    }
     void gemini.inputContext.close().catch(() => {});
     void gemini.outputContext.close().catch(() => {});
     try {
@@ -555,6 +560,15 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
 
         try {
           const outputContext = new AudioContext({ sampleRate: 24000 });
+          // Route audio through a MediaStreamDestination → <audio> element.
+          // This creates a browser media session that survives screen lock,
+          // keeping both AudioContexts alive (browsers exempt pages with
+          // active media playback from suspension).
+          const outputDestination = outputContext.createMediaStreamDestination();
+          if (audioElement) {
+            audioElement.srcObject = outputDestination.stream;
+            audioElement.play().catch(() => {});
+          }
           const inputContext = new AudioContext({ sampleRate: 16000 });
           inputContext.onstatechange = () => {
             debugLogClientVerbose("event", "gemini_audio_context_state", {
@@ -699,6 +713,8 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
             mediaStream,
             inputContext,
             outputContext,
+            outputDestination,
+            audioElement: audioElement ?? null,
             processor,
             source,
             silentGain,
