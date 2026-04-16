@@ -41,6 +41,11 @@ The app should be available at http://localhost:3000.
 - Google OAuth 2.0 for Gmail + Calendar access
 - OpenAI Realtime API for voice interaction
 
+## Merging and deploying
+
+**NEVER merge to main or deploy to Railway without the user's explicit instruction.**
+Always wait for the user to say to merge/push/deploy before running those commands.
+
 ## Deploying to Railway
 
 The app is hosted on Railway (project: `voice-email`, service: `voice-email`, environment: `production`).

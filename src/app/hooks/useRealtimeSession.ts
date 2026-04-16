@@ -42,6 +42,8 @@ type GeminiLiveRefs = {
   mediaStream: MediaStream;
   inputContext: AudioContext;
   outputContext: AudioContext;
+  outputDestination: MediaStreamDestinationNode;
+  audioElement: HTMLAudioElement | null;
   processor: ScriptProcessorNode;
   source: MediaStreamAudioSourceNode;
   silentGain: GainNode;
@@ -54,6 +56,7 @@ type GeminiLiveRefs = {
   lastAudioChunkLogAt: number;
   muted: boolean;
   closed: boolean;
+  visibilityHandler: (() => void) | null;
 };
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -332,7 +335,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
     const source = gemini.outputContext.createBufferSource();
     source.buffer = buffer;
     source.playbackRate.value = gemini.speechSpeed;
-    source.connect(gemini.outputContext.destination);
+    source.connect(gemini.outputDestination);
 
     const startAt = Math.max(gemini.outputContext.currentTime, gemini.nextPlaybackTime);
     source.start(startAt);
@@ -432,6 +435,10 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
     const gemini = geminiRef.current;
     if (!gemini) return;
     gemini.closed = true;
+    if (gemini.visibilityHandler) {
+      document.removeEventListener("visibilitychange", gemini.visibilityHandler);
+      gemini.visibilityHandler = null;
+    }
     stopGeminiPlayback();
     try {
       gemini.processor.disconnect();
@@ -440,6 +447,9 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
     } catch {}
     for (const track of gemini.mediaStream.getTracks()) {
       track.stop();
+    }
+    if (gemini.audioElement) {
+      gemini.audioElement.srcObject = null;
     }
     void gemini.inputContext.close().catch(() => {});
     void gemini.outputContext.close().catch(() => {});
@@ -550,6 +560,15 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
 
         try {
           const outputContext = new AudioContext({ sampleRate: 24000 });
+          // Route audio through a MediaStreamDestination → <audio> element.
+          // This creates a browser media session that survives screen lock,
+          // keeping both AudioContexts alive (browsers exempt pages with
+          // active media playback from suspension).
+          const outputDestination = outputContext.createMediaStreamDestination();
+          if (audioElement) {
+            audioElement.srcObject = outputDestination.stream;
+            audioElement.play().catch(() => {});
+          }
           const inputContext = new AudioContext({ sampleRate: 16000 });
           inputContext.onstatechange = () => {
             debugLogClientVerbose("event", "gemini_audio_context_state", {
@@ -694,6 +713,8 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
             mediaStream,
             inputContext,
             outputContext,
+            outputDestination,
+            audioElement: audioElement ?? null,
             processor,
             source,
             silentGain,
@@ -706,8 +727,28 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
             lastAudioChunkLogAt: 0,
             muted: false,
             closed: false,
+            visibilityHandler: null,
           };
           geminiRef.current = geminiRefs;
+
+          // Resume AudioContexts when screen unlocks / tab becomes visible.
+          // Browsers suspend AudioContext during screen lock, which kills
+          // both mic input and audio output for Gemini (WebRTC-based OpenAI
+          // sessions are unaffected because the browser keeps media sessions alive).
+          const visibilityHandler = () => {
+            const gemini = geminiRef.current;
+            if (!gemini || gemini.closed) return;
+            if (document.visibilityState === "visible") {
+              debugLogClient("event", "gemini_visibility_resumed", {
+                inputState: gemini.inputContext.state,
+                outputState: gemini.outputContext.state,
+              });
+              void resumeAudioContext(gemini.inputContext, "input-visibility");
+              void resumeAudioContext(gemini.outputContext, "output-visibility");
+            }
+          };
+          document.addEventListener("visibilitychange", visibilityHandler);
+          geminiRefs.visibilityHandler = visibilityHandler;
 
           processor.onaudioprocess = (event) => {
             const gemini = geminiRef.current;
