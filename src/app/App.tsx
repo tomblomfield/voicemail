@@ -247,9 +247,10 @@ function App() {
 
   const fetchSessionData = async (
     voiceModel: VoiceModelId,
-  ): Promise<{ key: string; dbAvailable: boolean; accountCount: number } | null> => {
+  ): Promise<{ key: string; dbAvailable: boolean; accountCount: number; timezone: string | null } | null> => {
     const modelLogFields = voiceLogFields(voiceModel);
-    const url = `/api/session?voiceModel=${encodeURIComponent(voiceModel)}`;
+    const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const url = `/api/session?voiceModel=${encodeURIComponent(voiceModel)}&timezone=${encodeURIComponent(browserTimezone)}`;
     logClientEvent(
       {
         url,
@@ -280,6 +281,7 @@ function App() {
       key: data.client_secret.value,
       dbAvailable: !!data.dbAvailable,
       accountCount: data.accountCount || 1,
+      timezone: data.timezone || null,
     };
   };
 
@@ -462,6 +464,7 @@ function App() {
           window.location.href = "/api/auth/logout";
         },
         accounts: authState?.accounts || [],
+        timezone: session.timezone,
         logContext: {
           ...voiceLogFields(voiceModel),
           ...voiceSettingsLogFields(settings),

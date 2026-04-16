@@ -56,6 +56,7 @@ export interface EmailTriageDeps {
   accounts: AccountInfo[];
   focusedAccountId: () => string | null;
   setFocusedAccountId: (id: string | null) => void;
+  timezone: string | null;
   voice?: string;
   logContext?: {
     provider: string;
@@ -191,7 +192,8 @@ You are a voice-first email and calendar assistant. The user may not be looking 
 - The user can ask to send a new email. Use find_contact to resolve names. If multiple contacts match, read the top 2-3 and ask which one.
 - Always confirm recipient, any cc or bcc recipients, subject, and body before sending a new email.
 
-# Calendar
+# Calendar${deps.timezone ? `
+- The user's timezone is ${deps.timezone}. Always use this timezone when interpreting dates and times. When the user says "May 19th" or "tomorrow", construct ISO 8601 timestamps in their timezone (e.g., "2026-05-19T00:00:00-07:00" for America/Los_Angeles), NOT in UTC. This ensures calendar queries cover the correct local day.` : ''}
 - Use calendar tools for calendar questions, searches, creates, edits, and deletes.
 - Before the first calendar-related task in a session, call run_calendar_setup to infer home, work, and conferencing defaults from calendar history.
 - Make clear that setup results are inferred from past invites, not stored facts.
@@ -990,18 +992,18 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
       tool({
         name: "list_calendar_events",
         description:
-          "List Google Calendar events in a time range, or search for events by keyword. Use this when the user asks what is on their calendar today, tomorrow, this afternoon, or during any specific window." +
+          "List Google Calendar events in a time range, or search for events by keyword. Use this when the user asks what is on their calendar today, tomorrow, this afternoon, or during any specific window. Always use the user's timezone when constructing start_time and end_time — never use UTC midnight for a local-day query." +
           (isMultiAccount ? " Merges calendars from all connected accounts." : ""),
         parameters: {
           type: "object",
           properties: {
             start_time: {
               type: "string",
-              description: "Start of the time window in ISO 8601 format.",
+              description: "Start of the time window in ISO 8601 format. Use the user's timezone offset (e.g., 2026-05-19T00:00:00-07:00), not UTC.",
             },
             end_time: {
               type: "string",
-              description: "End of the time window in ISO 8601 format.",
+              description: "End of the time window in ISO 8601 format. Use the user's timezone offset (e.g., 2026-05-20T00:00:00-07:00), not UTC.",
             },
             query: {
               type: "string",
@@ -1510,7 +1512,7 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
             tool({
               name: "get_my_profile",
               description:
-                "Retrieve the user's saved profile: home address, work address, phone number, and conference link.",
+                "Retrieve the user's saved profile: home address, work address, phone number, conference link, and timezone.",
               parameters: {
                 type: "object",
                 properties: {},
@@ -1540,6 +1542,10 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
                     type: "string",
                     description: "The user's preferred video conference link.",
                   },
+                  timezone: {
+                    type: "string",
+                    description: "The user's IANA timezone, e.g. America/Los_Angeles.",
+                  },
                 },
                 required: [],
                 additionalProperties: false,
@@ -1552,6 +1558,7 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
                   workAddress: args.work_address,
                   phoneNumber: args.phone_number,
                   conferenceLink: args.conference_link,
+                  timezone: args.timezone,
                 });
                 if (data.error) { debugLogClient("error", "update_my_profile: failed", data.error); return { error: data.error }; }
                 debugLogClient("tool", "update_my_profile: success");

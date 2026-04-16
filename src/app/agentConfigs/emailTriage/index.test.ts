@@ -57,6 +57,7 @@ function makeDeps(emails: EmailData[] = []) {
       accounts: [],
       focusedAccountId: () => state.focusedAccountId,
       setFocusedAccountId: (id: string | null) => { state.focusedAccountId = id; },
+      timezone: "America/Los_Angeles" as string | null,
     } satisfies EmailTriageDeps,
   };
 }
@@ -260,6 +261,78 @@ describe("EmailTriageDeps logic", () => {
       expect(agent.handoffDescription).toContain("hands-free use");
       expect(agent.handoffDescription).not.toContain("driving");
       expect(agent.instructions).not.toContain("driving");
+    });
+
+    it("includes timezone in system prompt when set", () => {
+      const { deps } = makeDeps();
+      deps.timezone = "America/Los_Angeles";
+      const agent = createEmailTriageAgent(deps);
+
+      expect(agent.instructions).toContain("America/Los_Angeles");
+      expect(agent.instructions).toContain("Always use this timezone when interpreting dates and times");
+      expect(agent.instructions).toContain("NOT in UTC");
+    });
+
+    it("includes a different timezone when set to another value", () => {
+      const { deps } = makeDeps();
+      deps.timezone = "Europe/London";
+      const agent = createEmailTriageAgent(deps);
+
+      expect(agent.instructions).toContain("Europe/London");
+      expect(agent.instructions).toContain("Always use this timezone");
+    });
+
+    it("omits timezone instruction when timezone is null", () => {
+      const { deps } = makeDeps();
+      deps.timezone = null;
+      const agent = createEmailTriageAgent(deps);
+
+      expect(agent.instructions).not.toContain("The user's timezone is");
+      expect(agent.instructions).not.toContain("NOT in UTC");
+    });
+  });
+
+  describe("timezone in tools", () => {
+    it("update_my_profile tool includes timezone parameter", () => {
+      const { deps } = makeDeps();
+      const agent = createEmailTriageAgent(deps);
+      const updateTool = agent.tools.find((t: any) => t.name === "update_my_profile") as any;
+
+      expect(updateTool).toBeTruthy();
+      const schema = updateTool.params_json_schema || updateTool.parameters;
+      expect(schema.properties.timezone).toBeTruthy();
+      expect(schema.properties.timezone.type).toBe("string");
+    });
+
+    it("update_my_profile passes timezone to the API", async () => {
+      mockFetch.mockResolvedValue({ json: async () => ({ success: true }) });
+
+      const { deps } = makeDeps();
+      const agent = createEmailTriageAgent(deps);
+      const updateTool = agent.tools.find((t: any) => t.name === "update_my_profile") as any;
+
+      await updateTool.invoke(
+        {} as any,
+        JSON.stringify({ timezone: "America/New_York" })
+      );
+
+      const apiCall = mockFetch.mock.calls.find(
+        (call) =>
+          call[0] === "/api/gmail" &&
+          JSON.parse(call[1].body).action === "updateProfile"
+      );
+      expect(apiCall).toBeTruthy();
+      expect(JSON.parse(apiCall![1].body).timezone).toBe("America/New_York");
+    });
+
+    it("list_calendar_events tool description mentions timezone", () => {
+      const { deps } = makeDeps();
+      const agent = createEmailTriageAgent(deps);
+      const calTool = agent.tools.find((t: any) => t.name === "list_calendar_events") as any;
+
+      expect(calTool).toBeTruthy();
+      const desc = calTool.description;
+      expect(desc).toContain("timezone");
     });
   });
 

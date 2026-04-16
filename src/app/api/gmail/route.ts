@@ -454,6 +454,7 @@ async function handleAction(
         workAddress: user?.work_address || null,
         phoneNumber: user?.phone_number || null,
         conferenceLink: user?.conference_link || null,
+        timezone: user?.timezone || null,
       };
     }
     case "updateProfile": {
@@ -463,6 +464,7 @@ async function handleAction(
         workAddress: params.workAddress,
         phoneNumber: params.phoneNumber,
         conferenceLink: params.conferenceLink,
+        timezone: params.timezone,
       });
       return { success: true };
     }

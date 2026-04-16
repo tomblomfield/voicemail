@@ -23,10 +23,14 @@ export async function initDb(): Promise<void> {
       work_address TEXT,
       phone_number VARCHAR(50),
       conference_link TEXT,
+      timezone VARCHAR(100),
       created_at TIMESTAMPTZ DEFAULT NOW(),
       last_session_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    -- Add timezone column to existing installations
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone VARCHAR(100);
 
     CREATE TABLE IF NOT EXISTS user_memories (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -123,7 +127,7 @@ export async function upsertUser(email: string): Promise<{ id: string; email: st
 export async function getUserByEmail(email: string) {
   if (!pool) return null;
   const result = await pool.query(
-    `SELECT id, email, home_address, work_address, phone_number, conference_link,
+    `SELECT id, email, home_address, work_address, phone_number, conference_link, timezone,
             created_at, last_session_at, updated_at
      FROM users WHERE email = $1`,
     [email.toLowerCase()]
@@ -138,6 +142,7 @@ export async function updateUserProfile(
     workAddress?: string | null;
     phoneNumber?: string | null;
     conferenceLink?: string | null;
+    timezone?: string | null;
   }
 ): Promise<void> {
   if (!pool) return;
@@ -160,6 +165,10 @@ export async function updateUserProfile(
   if (fields.conferenceLink !== undefined) {
     setClauses.push(`conference_link = $${paramIndex++}`);
     values.push(fields.conferenceLink);
+  }
+  if (fields.timezone !== undefined) {
+    setClauses.push(`timezone = $${paramIndex++}`);
+    values.push(fields.timezone);
   }
 
   values.push(email.toLowerCase());
@@ -312,7 +321,7 @@ export async function countGoogleAccounts(userId: string): Promise<number> {
 export async function getUserById(userId: string) {
   if (!pool) return null;
   const result = await pool.query(
-    `SELECT id, email, home_address, work_address, phone_number, conference_link,
+    `SELECT id, email, home_address, work_address, phone_number, conference_link, timezone,
             created_at, last_session_at, updated_at
      FROM users WHERE id = $1`,
     [userId]
@@ -327,6 +336,7 @@ export async function updateUserProfileById(
     workAddress?: string | null;
     phoneNumber?: string | null;
     conferenceLink?: string | null;
+    timezone?: string | null;
   }
 ): Promise<void> {
   if (!pool) return;
@@ -349,6 +359,10 @@ export async function updateUserProfileById(
   if (fields.conferenceLink !== undefined) {
     setClauses.push(`conference_link = $${paramIndex++}`);
     values.push(fields.conferenceLink);
+  }
+  if (fields.timezone !== undefined) {
+    setClauses.push(`timezone = $${paramIndex++}`);
+    values.push(fields.timezone);
   }
 
   values.push(userId);

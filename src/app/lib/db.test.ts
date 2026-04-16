@@ -123,6 +123,38 @@ describe("memories", () => {
   });
 });
 
+describe("timezone in profile", () => {
+  it("starts as null", async () => {
+    const user = await getUserByEmail(TEST_EMAIL);
+    expect(user!.timezone).toBeNull();
+  });
+
+  it("can be set via updateUserProfile", async () => {
+    await updateUserProfile(TEST_EMAIL, { timezone: "America/Los_Angeles" });
+    const user = await getUserByEmail(TEST_EMAIL);
+    expect(user!.timezone).toBe("America/Los_Angeles");
+  });
+
+  it("persists across other field updates", async () => {
+    await updateUserProfile(TEST_EMAIL, { phoneNumber: "+1-555-9999" });
+    const user = await getUserByEmail(TEST_EMAIL);
+    expect(user!.timezone).toBe("America/Los_Angeles");
+    expect(user!.phone_number).toBe("+1-555-9999");
+  });
+
+  it("can be changed to a different timezone", async () => {
+    await updateUserProfile(TEST_EMAIL, { timezone: "America/New_York" });
+    const user = await getUserByEmail(TEST_EMAIL);
+    expect(user!.timezone).toBe("America/New_York");
+  });
+
+  it("can be cleared by setting null", async () => {
+    await updateUserProfile(TEST_EMAIL, { timezone: null });
+    const user = await getUserByEmail(TEST_EMAIL);
+    expect(user!.timezone).toBeNull();
+  });
+});
+
 describe("getAllUsers", () => {
   it("returns a list including the test user", async () => {
     const users = await getAllUsers();

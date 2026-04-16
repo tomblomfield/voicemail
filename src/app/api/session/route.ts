@@ -9,6 +9,8 @@ import {
   upsertUser,
   isDbAvailable,
   getGoogleAccounts,
+  getUserByEmail,
+  updateUserProfile,
 } from "@/app/lib/db";
 import {
   SESSION_COOKIE_NAME,
@@ -50,7 +52,9 @@ export async function GET(request: NextRequest) {
   }
 
   const voiceModel = getVoiceModel(request.nextUrl.searchParams.get("voiceModel"));
+  const browserTimezone = request.nextUrl.searchParams.get("timezone");
   let providerStartMs: number | null = null;
+  let userTimezone: string | null = null;
   try {
     console.log(
       `session_started: ${userEmail} accounts=${accountCount} voiceModel=${voiceModel.id}`
@@ -58,6 +62,18 @@ export async function GET(request: NextRequest) {
     if (userEmail && isDbAvailable()) {
       await initDb();
       await upsertUser(userEmail);
+
+      // Resolve timezone: prefer browser-detected, fall back to stored
+      const user = await getUserByEmail(userEmail);
+      if (browserTimezone) {
+        userTimezone = browserTimezone;
+        // Persist browser timezone if different from stored
+        if (user?.timezone !== browserTimezone) {
+          await updateUserProfile(userEmail, { timezone: browserTimezone });
+        }
+      } else {
+        userTimezone = user?.timezone || null;
+      }
     }
 
     if (voiceModel.provider === "gemini") {
@@ -124,6 +140,7 @@ export async function GET(request: NextRequest) {
         model: voiceModel.model,
         dbAvailable: isDbAvailable(),
         accountCount,
+        timezone: userTimezone,
       });
     }
 
@@ -178,6 +195,7 @@ export async function GET(request: NextRequest) {
       model: voiceModel.model,
       dbAvailable: isDbAvailable(),
       accountCount,
+      timezone: userTimezone,
     });
   } catch (error) {
     logLatencyTelemetry({
