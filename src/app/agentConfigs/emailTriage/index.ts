@@ -346,6 +346,136 @@ export function createEmailTriageAgent(deps: EmailTriageDeps) {
     );
   }
 
+  async function getNextEmailResult(args: { email_id?: string } = {}) {
+    debugLogClient("tool", "get_next_email: executing", args);
+    const emails = deps.emails();
+    if (emails.length === 0) {
+      const summary = deps.getActionSummary();
+      return {
+        done: true,
+        message: "No more unread emails.",
+        sessionSummary: {
+          replied: summary.replied,
+          skipped: summary.skipped,
+          archived: summary.archived,
+          blocked: summary.blocked,
+          unsubscribed: summary.unsubscribed,
+          total:
+            summary.replied +
+            summary.skipped +
+            summary.archived +
+            summary.blocked +
+            summary.unsubscribed,
+        },
+      };
+    }
+
+    let emailIdx: number;
+    if (args.email_id) {
+      emailIdx = emails.findIndex((e) => e.id === args.email_id);
+      if (emailIdx === -1) emailIdx = 0;
+    } else {
+      emailIdx = deps.emailIndex();
+      if (emailIdx >= emails.length) {
+        const summary = deps.getActionSummary();
+        return {
+          done: true,
+          message: "No more unread emails.",
+          sessionSummary: {
+            replied: summary.replied,
+            skipped: summary.skipped,
+            archived: summary.archived,
+            blocked: summary.blocked,
+            unsubscribed: summary.unsubscribed,
+            total:
+              summary.replied +
+              summary.skipped +
+              summary.archived +
+              summary.blocked +
+              summary.unsubscribed,
+          },
+        };
+      }
+    }
+
+    const email = emails[emailIdx];
+    deps.advanceIndex();
+
+    const threadData = await fetchThreadForEmail(email);
+
+    const threadMessages = threadData.messages || [];
+    const participants = threadData.participants || [];
+    let conversationContext = "";
+    if (threadMessages.length > 1) {
+      conversationContext = threadMessages
+        .map((m: any) => `[${m.from}]: ${m.body}`)
+        .join("\n---\n");
+    } else if (threadMessages.length === 1) {
+      conversationContext = threadMessages[0].body;
+    } else {
+      const bodyData = await gmailApi({
+        action: "read",
+        messageId: email.id,
+        accountId: email.accountId,
+      });
+      conversationContext = bodyData.body || email.snippet;
+    }
+
+    const attachments = threadData.attachments || [];
+
+    const emailResult: any = {
+      id: email.id,
+      threadId: email.threadId,
+      from: email.from,
+      to: email.to,
+      cc: email.cc,
+      subject: email.subject,
+      date: email.date,
+      threadLength: threadMessages.length,
+      body: conversationContext,
+      participants,
+      participantCount: participants.length,
+      hasMultiplePeople: participants.length > 1,
+      ...(attachments.length > 0 && {
+        attachments: attachments.map((a: any) => ({
+          filename: a.filename,
+          type: a.mimeType,
+          sizeKB: Math.round((a.size || 0) / 1024),
+        })),
+        attachmentCount: attachments.length,
+      }),
+    };
+
+    if (isMultiAccount) {
+      emailResult.accountId = email.accountId;
+      emailResult.accountName = email.accountName;
+    }
+    prefetchLikelyThreads(deps.emails(), deps.emailIndex());
+
+    debugLogClient("tool", "get_next_email: returning email", {
+      messageId: email.id,
+      threadId: email.threadId,
+      bodyLen: emailResult.body.length,
+      threadLen: threadMessages.length,
+    });
+    debugLogClientVerbose(
+      "tool",
+      "get_next_email -> LLM TOOL RESULT",
+      redactForLog(emailResult)
+    );
+    return emailResult;
+  }
+
+  async function actionResultWithNextEmail<T extends Record<string, any>>(
+    result: T
+  ) {
+    const nextEmail = await getNextEmailResult();
+    return {
+      ...result,
+      nextEmail,
+    };
+  }
+
   const agent = new RealtimeAgent({
     name: "emailTriage",
     voice: deps.voice ?? "ash",
@@ -368,9 +498,10 @@ You are a voice-first email and calendar assistant. The user may not be looking 
 2. When the user asks to start, continue, open/read one, or names a sender, call get_next_email and wait for the result.
 3. Present the email briefly: sender, subject, the key point, whether the user is CC'd/BCC'd, and any attachments. If threadLength > 1, summarize the whole thread. Then ask how to handle this email.
 4. Handle reply, forward, skip, archive, block, and unsubscribe with the matching tool. Confirm before sending replies, forwards, new emails, creating/updating filters, or deleting calendar events.
-5. After a completed triage action, immediately call get_next_email and present the next email. Do not ask "what next," ask whether to continue, or wait for permission to move on. A brief transition is fine, e.g. "Archived. Next: ..."
-6. If there are no more loaded emails, give the session summary. If has_more_emails is true, offer to load the next batch with fetch_more_emails.
-7. If the user asks to refresh or check for new mail, call reload_emails.
+5. Archive, skip/mark-read, and unsubscribe are fire-and-forget background actions. Do not wait for Gmail to confirm them, do not mention background status, and do not narrate failures unless the tool explicitly returns an error in the current result.
+6. After a completed triage action, present the next email from the tool result's nextEmail field. If nextEmail is missing, immediately call get_next_email. Do not ask "what next," ask whether to continue, or wait for permission to move on. A brief transition is fine, e.g. "Archived. Next: ..."
+7. If there are no more loaded emails, give the session summary. If has_more_emails is true, offer to load the next batch with fetch_more_emails.
+8. If the user asks to refresh or check for new mail, call reload_emails.
 
 # Search & Compose
 - The user can ask to find old emails at any time (e.g., "Did Sarah send me that report?"). Use search_emails with Gmail search syntax.
@@ -653,109 +784,7 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
           additionalProperties: false,
         },
         execute: async (args: any) => {
-          debugLogClient("tool", "get_next_email: executing", args);
-          const emails = deps.emails();
-          if (emails.length === 0) {
-            const summary = deps.getActionSummary();
-            return {
-              done: true,
-              message: "No more unread emails.",
-              sessionSummary: {
-                replied: summary.replied,
-                skipped: summary.skipped,
-                archived: summary.archived,
-                blocked: summary.blocked,
-                unsubscribed: summary.unsubscribed,
-                total: summary.replied + summary.skipped + summary.archived + summary.blocked + summary.unsubscribed,
-              },
-            };
-          }
-
-          let emailIdx: number;
-          if (args.email_id) {
-            emailIdx = emails.findIndex((e) => e.id === args.email_id);
-            if (emailIdx === -1) emailIdx = 0;
-          } else {
-            emailIdx = deps.emailIndex();
-            if (emailIdx >= emails.length) {
-              const summary = deps.getActionSummary();
-              return {
-                done: true,
-                message: "No more unread emails.",
-                sessionSummary: {
-                  replied: summary.replied,
-                  skipped: summary.skipped,
-                  archived: summary.archived,
-                  blocked: summary.blocked,
-                  unsubscribed: summary.unsubscribed,
-                  total: summary.replied + summary.skipped + summary.archived + summary.blocked + summary.unsubscribed,
-                },
-              };
-            }
-          }
-
-          const email = emails[emailIdx];
-          deps.advanceIndex();
-
-          const threadData = await fetchThreadForEmail(email);
-
-          const threadMessages = threadData.messages || [];
-          const participants = threadData.participants || [];
-          let conversationContext = "";
-          if (threadMessages.length > 1) {
-            conversationContext = threadMessages
-              .map((m: any) => `[${m.from}]: ${m.body}`)
-              .join("\n---\n");
-          } else if (threadMessages.length === 1) {
-            conversationContext = threadMessages[0].body;
-          } else {
-            const bodyData = await gmailApi({
-              action: "read",
-              messageId: email.id,
-              accountId: email.accountId,
-            });
-            conversationContext = bodyData.body || email.snippet;
-          }
-
-          const attachments = threadData.attachments || [];
-
-          const emailResult: any = {
-            id: email.id,
-            threadId: email.threadId,
-            from: email.from,
-            to: email.to,
-            cc: email.cc,
-            subject: email.subject,
-            date: email.date,
-            threadLength: threadMessages.length,
-            body: conversationContext,
-            participants,
-            participantCount: participants.length,
-            hasMultiplePeople: participants.length > 1,
-            ...(attachments.length > 0 && {
-              attachments: attachments.map((a: any) => ({
-                filename: a.filename,
-                type: a.mimeType,
-                sizeKB: Math.round((a.size || 0) / 1024),
-              })),
-              attachmentCount: attachments.length,
-            }),
-          };
-
-          if (isMultiAccount) {
-            emailResult.accountId = email.accountId;
-            emailResult.accountName = email.accountName;
-          }
-          prefetchLikelyThreads(deps.emails(), deps.emailIndex());
-
-          debugLogClient("tool", "get_next_email: returning email", {
-            messageId: email.id,
-            threadId: email.threadId,
-            bodyLen: emailResult.body.length,
-            threadLen: threadMessages.length,
-          });
-          debugLogClientVerbose("tool", "get_next_email → LLM TOOL RESULT", redactForLog(emailResult));
-          return emailResult;
+          return getNextEmailResult(args);
         },
       }),
 
@@ -831,7 +860,10 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
           });
           deps.recordAction("reply");
           debugLogClient("tool", "reply_to_email: success");
-          return { success: true, message: "Reply sent and email archived." };
+          return actionResultWithNextEmail({
+            success: true,
+            message: "Reply sent and email archived.",
+          });
         },
       }),
 
@@ -894,7 +926,7 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
       tool({
         name: "archive_email",
         description:
-          "Archive the current email thread (remove from inbox). This archives the entire conversation. Call this when the user says to archive.",
+          "Queue a background archive for the current email thread (remove from inbox), update the local queue, and return the next email immediately. This archives the entire conversation. Call this when the user says to archive.",
         parameters: {
           type: "object",
           properties: {
@@ -922,7 +954,11 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
           });
           deps.recordAction("archive");
           debugLogClient("tool", "archive_email: queued background archive");
-          return { success: true, background: true, message: "Email archived." };
+          return actionResultWithNextEmail({
+            success: true,
+            background: true,
+            message: "Email archived.",
+          });
         },
       }),
 
@@ -955,19 +991,19 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
             threadIds: threadId ? [threadId] : [],
           });
           deps.recordAction("block");
-          return {
+          return actionResultWithNextEmail({
             success: true,
             blockedEmail: data.blockedEmail,
             blockedName: data.blockedName,
             message: `Blocked ${data.blockedName || data.blockedEmail}. All future emails from them will go to trash.`,
-          };
+          });
         },
       }),
 
       tool({
         name: "unsubscribe_from_email",
         description:
-          "Unsubscribe from a mailing list or newsletter. Automatically detects the best unsubscribe method (one-click, email, or browser automation) and handles it. The email is archived after unsubscribing. Call this when the user says 'unsubscribe', 'stop these emails', 'unsubscribe from this', or similar.",
+          "Queue a background unsubscribe from a mailing list or newsletter, update the local queue, and return the next email immediately. The background action automatically detects the best unsubscribe method (one-click, email, or browser automation) and archives the email after unsubscribing. Call this when the user says 'unsubscribe', 'stop these emails', 'unsubscribe from this', or similar.",
         parameters: {
           type: "object",
           properties: {
@@ -996,18 +1032,18 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
           });
           deps.recordAction("unsubscribe");
           debugLogClient("tool", "unsubscribe_from_email: queued background unsubscribe");
-          return {
+          return actionResultWithNextEmail({
             success: true,
             background: true,
             message: "Started unsubscribing from this sender in the background.",
-          };
+          });
         },
       }),
 
       tool({
         name: "skip_email",
         description:
-          "Skip the current email — marks it as read and moves on. Call this when the user says skip or next.",
+          "Queue a background mark-read for the current email, update the local queue, and return the next email immediately. Call this when the user says skip or next.",
         parameters: {
           type: "object",
           properties: {
@@ -1022,18 +1058,21 @@ ${buildMultiAccountInstructions(deps.accounts)}`,
         execute: async (args: any) => {
           debugLogClient("tool", "skip_email: executing", args);
           const accountId = getAccountIdForEmail(args.message_id);
-          const data = await gmailApi({
+          runBackgroundGmailAction("skip_email markRead", {
             action: "markRead",
             messageId: args.message_id,
             accountId,
           });
-          if (data.error) { debugLogClient("error", "skip_email: failed", data.error); return { error: data.error }; }
           const threadId = getThreadIdForEmail(args.message_id);
           forgetThreadCache(threadId, accountId);
           removeEmailsFromQueue({ messageIds: [args.message_id] });
           deps.recordAction("skip");
-          debugLogClient("tool", "skip_email: success");
-          return { success: true, message: "Email marked as read." };
+          debugLogClient("tool", "skip_email: queued background mark-read");
+          return actionResultWithNextEmail({
+            success: true,
+            background: true,
+            message: "Email skipped.",
+          });
         },
       }),
 

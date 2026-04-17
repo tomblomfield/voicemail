@@ -276,7 +276,15 @@ describe("EmailTriageDeps logic", () => {
       const { deps } = makeDeps();
       const agent = createEmailTriageAgent(deps);
 
-      expect(agent.instructions).toContain("After a completed triage action, immediately call get_next_email");
+      expect(agent.instructions).toContain(
+        "After a completed triage action, present the next email from the tool result's nextEmail field"
+      );
+      expect(agent.instructions).toContain(
+        "If nextEmail is missing, immediately call get_next_email"
+      );
+      expect(agent.instructions).toContain(
+        "Archive, skip/mark-read, and unsubscribe are fire-and-forget background actions"
+      );
       expect(agent.instructions).toContain('Do not ask "what next," ask whether to continue, or wait for permission to move on');
       expect(agent.instructions).toContain("Then ask how to handle this email");
     });
@@ -452,7 +460,7 @@ describe("EmailTriageDeps logic", () => {
       });
     });
 
-    it("archive tool removes the email thread from the local queue", async () => {
+    it("archive tool removes the email thread and returns the next email", async () => {
       mockFetch.mockResolvedValue({ json: async () => ({ success: true }) });
 
       const { deps, state } = makeDeps([
@@ -464,13 +472,17 @@ describe("EmailTriageDeps logic", () => {
       const agent = createEmailTriageAgent(deps);
       const archiveTool = agent.tools.find((t: any) => t.name === "archive_email") as any;
 
-      await archiveTool.invoke(
+      const result = parseToolResult(await archiveTool.invoke(
         {} as any,
         JSON.stringify({ message_id: "msg-1" })
-      );
+      ));
 
       expect(state.emails.map((email) => email.id)).toEqual(["msg-2"]);
-      expect(state.idx).toBe(0);
+      expect(state.idx).toBe(1);
+      expect(result.nextEmail).toMatchObject({
+        id: "msg-2",
+        threadId: "thread-2",
+      });
     });
 
     it("prefetches thread bodies after email count and reuses the in-flight request", async () => {
@@ -569,6 +581,33 @@ describe("EmailTriageDeps logic", () => {
       });
 
       unsubscribe.resolve({ json: async () => ({ success: true }) });
+    });
+
+    it("skip tool returns before the Gmail mark-read request completes", async () => {
+      const markRead = deferred<any>();
+      mockFetch.mockReturnValue(markRead.promise);
+
+      const { deps, state } = makeDeps([makeEmail()]);
+      const agent = createEmailTriageAgent(deps);
+      const skipTool = agent.tools.find((t: any) => t.name === "skip_email") as any;
+
+      const raw = await Promise.race([
+        skipTool.invoke({} as any, JSON.stringify({ message_id: "msg-1" })),
+        new Promise((resolve) => setTimeout(() => resolve("timed out"), 20)),
+      ]);
+      const result = parseToolResult(raw);
+
+      expect(raw).not.toBe("timed out");
+      expect(result).toMatchObject({ success: true, background: true });
+      expect(state.emails).toEqual([]);
+      expect(state.actions.skipped).toBe(1);
+      expect(gmailCalls()).toHaveLength(1);
+      expect(JSON.parse(gmailCalls()[0][1].body)).toMatchObject({
+        action: "markRead",
+        messageId: "msg-1",
+      });
+
+      markRead.resolve({ json: async () => ({ success: true }) });
     });
 
     it("passes partial subject words through filter creation and retrospective apply", async () => {
