@@ -42,7 +42,7 @@ type GeminiLiveRefs = {
   mediaStream: MediaStream;
   inputContext: AudioContext;
   outputContext: AudioContext;
-  outputDestination: MediaStreamDestinationNode;
+  outputDestination: MediaStreamAudioDestinationNode;
   audioElement: HTMLAudioElement | null;
   processor: ScriptProcessorNode;
   source: MediaStreamAudioSourceNode;
